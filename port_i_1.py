@@ -641,22 +641,6 @@ class VesselItem(QGraphicsRectItem):
                 self.connection_line.update_line()
         return super().itemChange(change, value)
 
-# --- Port Data Structure ---
-class PortData:
-    def __init__(self, code, name):
-        self.code = code
-        self.name = name
-        self.vessel_data_list = []
-        self.original_vessel_data = [] 
-        self.terminal_list = []
-        self.ts_connections = {} 
-        
-        # Log Data (to repopulate tables)
-        # Master Log: List of tuples/dicts matching table columns
-        self.master_log_data = [] 
-        # Slave Log
-        self.slave_log_data = []
-        
 # --- Main App ---
 class BerthMonitor(QMainWindow):
     def __init__(self):
@@ -669,20 +653,9 @@ class BerthMonitor(QMainWindow):
             "접안방향", "접안예정일시", "출항예정일시"
         ]
         
-        # Multi-Port Setup
-        self.ports = {
-            'KRPUS': PortData('KRPUS', 'Busan'),
-            'KRKAN': PortData('KRKAN', 'Gwangyang'),
-            'KRINC': PortData('KRINC', 'Incheon')
-        }
-        self.active_port_code = 'KRPUS'
-        
-        # Helper References (pointers to active port's data)
-        self.vessel_data_list = self.ports['KRPUS'].vessel_data_list
-        self.original_vessel_data = self.ports['KRPUS'].original_vessel_data
-        self.terminal_list = self.ports['KRPUS'].terminal_list
-        self.ts_connections = self.ports['KRPUS'].ts_connections
-        
+        self.vessel_data_list = []
+        self.original_vessel_data = [] # For Reset feature
+        self.terminal_list = []
         self.pixels_per_hour = 5  
         self.row_height = 70      
         self.safety_gap_h = 2
@@ -693,44 +666,26 @@ class BerthMonitor(QMainWindow):
             "#9bf6ff", "#a0c4ff", "#bdb2ff", "#ffc6ff"
         ]
         
-        # Filtering
-        self.allowed_pairs = set() 
-        self.filter_widgets = {} 
+        self.ts_connections = {} # Key: LoadVesselItem, Value: List of (DischVesselItem, Color)
         
-        # Memo Data (Global)
-        self.memo_data = {} 
+        # Filtering
+        self.allowed_pairs = set() # Set of (line, route) tuples
+        self.filter_widgets = {} # Map 'Line' -> (LineCheckBox, List of RouteCheckBoxes)
+        
+        # Memo Data
+        self.memo_data = {} # Key: "VesselName|Voyage", Value: "Memo Content"
         self.is_memo_mode = False
         
-        # Port-Specific Header Mapping
-        # Maps external column names to internal standard names
-        self.port_header_maps = {
-            'KRPUS': {},  # Busan uses standard headers (no mapping needed)
-            'KRKAN': {  # Gwangyang mapping
-                '선박명': '모선명',
-                '모선항차': ['모선항차', '항차년도', '선사항차'],  # Multiple targets
-                '접안': '접안방향',
-                '입항 일시': '접안예정일시',
-                '출항 일시': '출항예정일시'
-            },
-            'KRINC': {  # Incheon mapping (same as Gwangyang)
-                '선박명': '모선명',
-                '모선항차': ['모선항차', '항차년도', '선사항차'],
-                '접안': '접안방향',
-                '입항 일시': '접안예정일시',
-                '출항 일시': '출항예정일시'
-            }
-        }
-        
-        # Animation Timer
+        # Animation Timer (Heart Spin & Rainbow)
         self.heart_angle = 0
         self.rainbow_hue = 0
         self.anim_timer = QTimer()
         self.anim_timer.timeout.connect(self.update_animation)
-        self.anim_timer.start(50) 
+        self.anim_timer.start(50) # 20fps
         
         self.initUI()
         self.apply_styles()
-        self.current_view_mode = "NORMAL"
+        self.current_view_mode = "NORMAL" # NORMAL, HIGHLIGHT, CONNECT
 
     def initUI(self):
         central_widget = QWidget()
@@ -747,59 +702,40 @@ class BerthMonitor(QMainWindow):
         # New Interactive Buttons
         
         # MEMO Button (Left of Copy)
-        self.btn_memo = QPushButton()
-        self.btn_memo.setText("❤ MEMO\noff")
+        self.btn_memo = QPushButton("❤ MEMO")
         self.btn_memo.setFixedSize(160, 45)
         self.btn_memo.setCheckable(True)
         self.btn_memo.clicked.connect(self.toggle_memo_mode)
         header_layout.addWidget(self.btn_memo)
 
-        self.copy_btn = QPushButton()
-        self.copy_btn.setText("📋 Vessel Copy\noff")
+        self.copy_btn = QPushButton("📋 Vessel Copy")
         self.copy_btn.setFixedSize(160, 45)
         self.copy_btn.setCheckable(True)
         self.copy_btn.clicked.connect(self.toggle_copy_mode)
         header_layout.addWidget(self.copy_btn)
         
-        self.highlight_btn = QPushButton()
-        self.highlight_btn.setText("✨ Highlight Mode\noff")
+        self.highlight_btn = QPushButton("✨ Highlight Mode")
         self.highlight_btn.setFixedSize(160, 45)
         self.highlight_btn.setCheckable(True)
         self.highlight_btn.clicked.connect(self.toggle_highlight_mode)
         header_layout.addWidget(self.highlight_btn)
 
-        self.connect_btn = QPushButton()
-        self.connect_btn.setText("🔗 Connect Mode\noff")
+        self.connect_btn = QPushButton("🔗 Connect Mode")
         self.connect_btn.setFixedSize(160, 45)
         self.connect_btn.setCheckable(True)
         self.connect_btn.clicked.connect(self.toggle_connect_mode)
         header_layout.addWidget(self.connect_btn)
 
-        self.reset_btn = QPushButton("🔄 Reset Current")
-        self.reset_btn.setFixedSize(160, 45)
+        self.reset_btn = QPushButton("🔄 Reset to Original")
+        self.reset_btn.setFixedSize(180, 45)
         self.reset_btn.clicked.connect(self.reset_data)
         self.reset_btn.setEnabled(False)
         header_layout.addWidget(self.reset_btn)
 
-        # SPLIT PASTE BUTTONS
-        btn_paste_krpus = QPushButton("Paste KRPUS")
-        btn_paste_krpus.setFixedSize(110, 45)
-        btn_paste_krpus.clicked.connect(lambda: self.paste_data('KRPUS'))
-        btn_paste_krpus.setStyleSheet("background-color: #bb9af7; color: black; font-weight: bold;")
-        header_layout.addWidget(btn_paste_krpus)
-
-        btn_paste_krkan = QPushButton("Paste KRKAN")
-        btn_paste_krkan.setFixedSize(110, 45)
-        btn_paste_krkan.clicked.connect(lambda: self.paste_data('KRKAN'))
-        btn_paste_krkan.setStyleSheet("background-color: #7dcfff; color: black; font-weight: bold;")
-        header_layout.addWidget(btn_paste_krkan)
-
-        btn_paste_krinc = QPushButton("Paste KRINC")
-        btn_paste_krinc.setFixedSize(110, 45)
-        btn_paste_krinc.clicked.connect(lambda: self.paste_data('KRINC'))
-        btn_paste_krinc.setStyleSheet("background-color: #9ece6a; color: black; font-weight: bold;")
-        header_layout.addWidget(btn_paste_krinc)
-        
+        self.paste_btn = QPushButton("📋 Paste & Parse Data")
+        self.paste_btn.setFixedSize(220, 45)
+        self.paste_btn.clicked.connect(self.paste_data)
+        header_layout.addWidget(self.paste_btn)
         main_layout.addLayout(header_layout)
         
         self.splitter = QSplitter(Qt.Vertical)
@@ -807,31 +743,10 @@ class BerthMonitor(QMainWindow):
         # Upper area: Graphic View + Sidebar with Horizontal Splitter
         self.upper_splitter = QSplitter(Qt.Horizontal)
         
-        # --- PORT TABS (GRAPHIC AREA) ---
-        self.graphic_container = QWidget()
-        gc_layout = QVBoxLayout(self.graphic_container)
-        gc_layout.setContentsMargins(0,0,0,0)
-        
-        self.port_tabs = QTabWidget()
-        self.port_tabs.setObjectName("portTabs")
-        self.port_tabs.setStyleSheet("""
-            QTabWidget::pane { border: 1px solid #414868; background: #1f2335; }
-            QTabBar::tab { background: #1a1b26; color: #a9b1d6; padding: 10px 15px; border: 1px solid #414868; border-bottom: none; border-top-left-radius: 4px; border-top-right-radius: 4px; font-weight: bold; }
-            QTabBar::tab:selected { background: #7aa2f7; color: #1a1b26; }
-        """)
-        
-        self.port_views = {}
-        for code, name in [('KRPUS', 'Busan'), ('KRKAN', 'Gwangyang'), ('KRINC', 'Incheon')]:
-             scene = QGraphicsScene()
-             scene.parent_view = self
-             view = ZoomableGraphicsView(scene)
-             self.port_views[code] = (view, scene)
-             self.port_tabs.addTab(view, name)
-             
-        self.port_tabs.currentChanged.connect(self.switch_port)
-        
-        gc_layout.addWidget(self.port_tabs)
-        self.upper_splitter.addWidget(self.graphic_container)
+        self.scene = QGraphicsScene()
+        self.scene.parent_view = self
+        self.gv = ZoomableGraphicsView(self.scene)
+        self.upper_splitter.addWidget(self.gv)
         
         self.sidebar = QWidget()
         self.sidebar.setMinimumWidth(380) # Increased width for tabs
@@ -966,9 +881,6 @@ class BerthMonitor(QMainWindow):
         self.splitter.setStretchFactor(0, 4)
         self.splitter.setStretchFactor(1, 1)
         main_layout.addWidget(self.splitter)
-        
-        # Set initial refs for KRPUS (Default Tab 0 aka Active)
-        self.gv, self.scene = self.port_views['KRPUS']
 
     def apply_styles(self):
         self.setStyleSheet("""
@@ -1000,96 +912,6 @@ class BerthMonitor(QMainWindow):
             QGroupBox { border: 1px solid #414868; border-radius: 5px; margin-top: 20px; font-weight: bold; color: #7aa2f7; }
             QGroupBox::title { subcontrol-origin: margin; left: 10px; padding: 0 5px; }
         """)
-
-    def switch_port(self, index):
-        active_code = list(self.port_views.keys())[index] # Tabs added in order KRPUS, KRKAN, KRINC
-        # Assuming order of keys matches tab order. Let's strictly rely on list order.
-        codes = ['KRPUS', 'KRKAN', 'KRINC']
-        if index < 0 or index >= len(codes): return
-        active_code = codes[index]
-
-        if self.active_port_code == active_code: return
-        
-        # 1. Update Active Code
-        self.active_port_code = active_code
-        port = self.ports[active_code]
-        
-        # 2. Update Data References
-        self.vessel_data_list = port.vessel_data_list
-        self.original_vessel_data = port.original_vessel_data
-        self.terminal_list = port.terminal_list
-        self.ts_connections = port.ts_connections
-        
-        # 3. Update View/Scene References
-        self.gv, self.scene = self.port_views[active_code]
-        
-        # 4. Refresh UI
-        self.reset_btn.setEnabled(len(self.original_vessel_data) > 0)
-        self.repopulate_logs()
-        self.update_filters()
-        self.populate_mapping_tables()
-        self.populate_memo_table()
-        self.refresh_ts_table() # Refresh TS Table from active dict
-        self.update_table()
-        self.draw_graphic()
-
-    def repopulate_logs(self):
-        # Master Log
-        self.master_table.setRowCount(0)
-        port = self.ports[self.active_port_code]
-        for entry in port.master_log_data:
-            self.add_master_log_row(entry)
-            
-        # Slave Log
-        self.slave_table.setRowCount(0)
-        for entry in port.slave_log_data:
-            self.add_slave_log_row(entry)
-
-    def add_master_log_row(self, entry):
-        row = self.master_table.rowCount()
-        self.master_table.insertRow(row)
-        
-        # Col 0: Vessel (Widget or Item)
-        if entry.get('vessel_widget_text'):
-             lbl = QLabel(entry['vessel_widget_text'])
-             lbl.setAlignment(Qt.AlignCenter)
-             lbl.setStyleSheet(entry['vessel_widget_style'])
-             self.master_table.setCellWidget(row, 0, lbl)
-        else:
-             self.master_table.setItem(row, 0, QTableWidgetItem(entry['vessel_text']))
-             
-        self.master_table.setItem(row, 1, QTableWidgetItem(entry['from']))
-        
-        # Col 2: To (Widget or Item)
-        if entry.get('to_widget_text'):
-             lbl = QLabel(entry['to_widget_text'])
-             lbl.setAlignment(Qt.AlignCenter)
-             lbl.setStyleSheet(entry['to_widget_style'])
-             self.master_table.setCellWidget(row, 2, lbl)
-        else:
-             self.master_table.setItem(row, 2, QTableWidgetItem(entry['to_text']))
-             
-        # Col 3: Shift
-        delta_item = QTableWidgetItem(entry['shift_text'])
-        delta_item.setTextAlignment(Qt.AlignCenter)
-        if entry.get('shift_color'):
-            delta_item.setForeground(QColor(entry['shift_color']))
-        self.master_table.setItem(row, 3, delta_item)
-        
-        self.master_table.scrollToBottom()
-
-    def add_slave_log_row(self, entry):
-        row = self.slave_table.rowCount()
-        self.slave_table.insertRow(row)
-        self.slave_table.setItem(row, 0, QTableWidgetItem(entry['name']))
-        self.slave_table.setItem(row, 1, QTableWidgetItem(entry['old_eta']))
-        self.slave_table.setItem(row, 2, QTableWidgetItem(entry['new_eta']))
-        
-        delta_item = QTableWidgetItem(entry['delta_str'])
-        delta_item.setTextAlignment(Qt.AlignCenter)
-        delta_item.setForeground(QColor("#ffb86c"))
-        self.slave_table.setItem(row, 3, delta_item)
-        self.slave_table.scrollToBottom()
 
     def create_filter_tab(self):
         self.tab_filters = QWidget()
@@ -1415,13 +1237,6 @@ class BerthMonitor(QMainWindow):
                 self.copy_btn.setChecked(False)
                 self.toggle_copy_mode()
             self.tabs.setCurrentWidget(self.tab_memo)
-            # ON state: complementary color (cyan) with ON text below
-            self.btn_memo.setStyleSheet("background-color: #00ffff; color: black;")
-            self.btn_memo.setText("❤ MEMO\non")
-        else:
-            # OFF state: original color with OFF text below
-            self.btn_memo.setStyleSheet("")
-            self.btn_memo.setText("❤ MEMO\noff")
 
     def on_memo_changed(self, row, col):
         if col == 1: # Memo Content changed
@@ -1585,26 +1400,20 @@ class BerthMonitor(QMainWindow):
             self.current_view_mode = "COPY"
             self.highlight_btn.setChecked(False)
             self.connect_btn.setChecked(False)
-            # ON state: complementary color (orange) with ON text below
-            self.copy_btn.setStyleSheet("background-color: #ff8c00; color: black;")
-            self.copy_btn.setText("📋 Vessel Copy\non")
+            self.copy_btn.setStyleSheet("background-color: #8be9fd; color: black;")
         else:
             self.current_view_mode = "NORMAL"
             self.copy_btn.setStyleSheet("")
-            self.copy_btn.setText("📋 Vessel Copy\noff")
 
     def toggle_highlight_mode(self):
         if self.highlight_btn.isChecked():
             self.current_view_mode = "HIGHLIGHT"
             self.copy_btn.setChecked(False)
             self.connect_btn.setChecked(False)
-            # ON state: complementary color (lime green) with ON text below
-            self.highlight_btn.setStyleSheet("background-color: #32cd32; color: black;")
-            self.highlight_btn.setText("✨ Highlight Mode\non")
+            self.highlight_btn.setStyleSheet("background-color: #ff9cf9; color: black;")
         else:
             self.current_view_mode = "NORMAL"
             self.highlight_btn.setStyleSheet("")
-            self.highlight_btn.setText("✨ Highlight Mode\noff")
             self.clear_analysis_artifacts()
  
     def toggle_connect_mode(self):
@@ -1612,13 +1421,10 @@ class BerthMonitor(QMainWindow):
             self.current_view_mode = "CONNECT"
             self.copy_btn.setChecked(False)
             self.highlight_btn.setChecked(False)
-            # ON state: complementary color (blue) with ON text below
-            self.connect_btn.setStyleSheet("background-color: #1e90ff; color: black;")
-            self.connect_btn.setText("🔗 Connect Mode\non")
+            self.connect_btn.setStyleSheet("background-color: #f1fa8c; color: black;")
         else:
             self.current_view_mode = "NORMAL"
             self.connect_btn.setStyleSheet("")
-            self.connect_btn.setText("🔗 Connect Mode\noff")
             self.clear_analysis_artifacts()
 
     def clear_analysis_artifacts(self):
@@ -1811,160 +1617,60 @@ class BerthMonitor(QMainWindow):
         self.clear_analysis_artifacts() # Clear visual effects
         self.current_view_mode = "NORMAL"
         self.highlight_btn.setChecked(False); self.highlight_btn.setStyleSheet("")
-        self.highlight_btn.setText("✨ Highlight Mode\noff")
         self.connect_btn.setChecked(False); self.connect_btn.setStyleSheet("")
-        self.connect_btn.setText("🔗 Connect Mode\noff")
-        self.copy_btn.setChecked(False); self.copy_btn.setStyleSheet("")
-        self.copy_btn.setText("📋 Vessel Copy\noff")
         
-        # Reset ACTIVE port data
-        port = self.ports[self.active_port_code]
-        port.vessel_data_list = copy.deepcopy(port.original_vessel_data)
-        
-        # Update Refs
-        self.vessel_data_list = port.vessel_data_list
-        
-        # Clear Logs
-        port.master_log_data = []
-        port.slave_log_data = []
-        port.ts_connections = {}
-        
-        self.repopulate_logs()
-        self.refresh_ts_table()
-        
+        self.vessel_data_list = copy.deepcopy(self.original_vessel_data)
+        self.master_table.setRowCount(0)
+        self.slave_table.setRowCount(0)
+        self.ts_table.setRowCount(0)
         self.update_table()
         self.draw_graphic()
 
-    def paste_data(self, target_port_code=None):
+    def paste_data(self):
         text = QApplication.clipboard().text()
         if not text.strip(): return
         
-        # Target Port
-        code = target_port_code if target_port_code else self.active_port_code
-        port = self.ports[code]
-        
         lines = text.strip().split('\n')
-        if len(lines) < 2: return  # Need at least header + 1 data row
+        self.vessel_data_list = []
+        berths = set()
         
-        # Parse header row
-        header_row = lines[0].split('\t')
-        
-        # Get port-specific mapping
-        port_map = self.port_header_maps.get(code, {})
-        
-        # Create reverse mapping: external_header -> internal_header(s)
-        # For KRPUS (Busan), no mapping needed - use headers as-is
-        if not port_map:
-            # Standard Busan format
-            new_list = []
-            berths = set()
+        for line in lines:
+            row = line.split('\t')
+            if len(row) < 12 or "번호" in line: continue
             
-            for line in lines[1:]:
-                row = line.split('\t')
-                if len(row) < 12 or "번호" in line: continue
-                
-                d = {self.headers[i]: row[i] for i in range(min(len(self.headers), len(row)))}
-                d['eta'] = parse_date(d.get('접안예정일시', ''))
-                d['etd'] = parse_date(d.get('출항예정일시', ''))
-                d['full_berth'] = f"{d.get('터미널', '')}-{d.get('선석', '')}"
-                new_list.append(d)
-                berths.add(d['full_berth'])
+            d = {self.headers[i]: row[i] for i in range(len(self.headers))}
+            d['eta'] = parse_date(d['접안예정일시'])
+            d['etd'] = parse_date(d['출항예정일시'])
+            # Create a combined Terminal-Berth key
+            d['full_berth'] = f"{d['터미널']}-{d['선석']}"
+            self.vessel_data_list.append(d)
+            berths.add(d['full_berth'])
+            
+        self.terminal_list = sorted(list(berths))
+        self.original_vessel_data = copy.deepcopy(self.vessel_data_list)
+        
+        self.update_filters() # NEW: Populate Filters
+        self.populate_mapping_tables() # NEW: Populate Mapping
+        
+        # AUTO-LOAD MAPPING
+        last_map = get_last_mapping_path()
+        if last_map and os.path.exists(last_map):
+            print(f"Auto-loading mapping from: {last_map}")
+            self.load_mappings(file_path=last_map)
+            self.apply_mappings()
+            
+        # AUTO-LOAD MEMOS
+        last_memo = get_last_memo_path()
+        if last_memo and os.path.exists(last_memo):
+            print(f"Auto-loading memos from: {last_memo}")
+            self.load_memos(file_path=last_memo)
         else:
-            # KRKAN/KRINC format - apply mapping
-            new_list = []
-            berths = set()
-            
-            for line in lines[1:]:
-                row = line.split('\t')
-                if len(row) < len(header_row) or "번호" in line: continue
-                
-                # Create dict with external headers
-                external_data = {header_row[i]: row[i] for i in range(min(len(header_row), len(row)))}
-                
-                # Map to internal format
-                d = {}
-                
-                # Apply mappings
-                for ext_header, int_header in port_map.items():
-                    if ext_header in external_data:
-                        value = external_data[ext_header]
-                        
-                        # Handle multiple target fields (e.g., 모선항차 -> [모선항차, 항차년도, 선사항차])
-                        if isinstance(int_header, list):
-                            for target in int_header:
-                                d[target] = value
-                        else:
-                            d[int_header] = value
-                
-                # Copy unmapped fields that match standard headers
-                for header in self.headers:
-                    if header not in d and header in external_data:
-                        d[header] = external_data[header]
-                
-                # Set fixed values for KRKAN/KRINC
-                if code in ['KRKAN', 'KRINC']:
-                    d['터미널'] = 'GWCT'
-                
-                # Ensure required fields exist
-                if '선석' not in d and '선석' in external_data:
-                    d['선석'] = external_data['선석']
-                if '선사' not in d and '선사' in external_data:
-                    d['선사'] = external_data['선사']
-                if '항로' not in d and '항로' in external_data:
-                    d['항로'] = external_data['항로']
-                
-                # Fill missing standard fields with empty strings
-                for header in self.headers:
-                    if header not in d:
-                        d[header] = ''
-                
-                # Parse dates
-                d['eta'] = parse_date(d.get('접안예정일시', ''))
-                d['etd'] = parse_date(d.get('출항예정일시', ''))
-                d['full_berth'] = f"{d.get('터미널', '')}-{d.get('선석', '')}"
-                
-                new_list.append(d)
-                berths.add(d['full_berth'])
-            
-        # Update SPECIFIC Port Data
-        port.vessel_data_list = new_list
-        port.terminal_list = sorted(list(berths))
-        port.original_vessel_data = copy.deepcopy(new_list)
+            # Just populate table empty
+            self.populate_memo_table()
         
-        # Reset Logs for that port
-        port.master_log_data = []
-        port.slave_log_data = []
-        port.ts_connections = {}
-        
-        # If updating ACTIVE port, refresh UI
-        if code == self.active_port_code:
-            self.vessel_data_list = port.vessel_data_list
-            self.original_vessel_data = port.original_vessel_data
-            self.terminal_list = port.terminal_list
-            self.ts_connections = port.ts_connections
-            
-            self.update_filters() 
-            self.populate_mapping_tables() 
-            
-            # AUTO-LOAD MAPPING
-            last_map = get_last_mapping_path()
-            if last_map and os.path.exists(last_map):
-                self.load_mappings(file_path=last_map)
-                self.apply_mappings()
-                
-            # AUTO-LOAD MEMOS
-            last_memo = get_last_memo_path()
-            if last_memo and os.path.exists(last_memo):
-                self.load_memos(file_path=last_memo)
-            else:
-                self.populate_memo_table()
-            
-            self.reset_btn.setEnabled(True)
-            self.repopulate_logs()
-            self.update_table()
-            self.draw_graphic()
-        else:
-            print(f"Pasted data to {code} (Background)")
+        self.reset_btn.setEnabled(True)
+        self.update_table()
+        self.draw_graphic()
 
     def update_table(self):
         self.table.setRowCount(len(self.vessel_data_list))
@@ -2101,7 +1807,6 @@ class BerthMonitor(QMainWindow):
             self.scene.addItem(item)
             self.vessel_items.append(item)
 
-
     def handle_vessel_move(self, master_item):
         new_y = master_item.pos().y()
         term_idx = max(0, min(round(new_y / self.row_height), len(self.terminal_list) - 1))
@@ -2145,71 +1850,86 @@ class BerthMonitor(QMainWindow):
         master_item.update_time_labels()
 
         # Update Change Sidebar TABLE
+        # Skip logging if FROM and TO are the same
         if old_term == new_term and old_eta == new_eta:
+            # No actual change, skip logging
             pass
         else:
-             # Construct Log Entry
+            row = self.master_table.rowCount()
+            self.master_table.insertRow(row)
             vessel_display = master_item.data['모선명'] + " (" + get_display_voyage(master_item.data['선사항차']) + ")"
-            vessel_widget_text = None
-            vessel_widget_style = None
             
-            if hasattr(master_item, 'copy_label'):
-                if master_item.copy_label == "1st":
-                     vessel_widget_text = vessel_display + " 1ST"
-                     vessel_widget_style = "border: 2px solid #ff0000; color: #ffffff; font-weight: bold; background: #ff0000; border-radius: 4px;"
-                elif master_item.copy_label == "2nd":
-                     vessel_widget_text = vessel_display + " 2ND"
-                     vessel_widget_style = "border: 2px solid #0088ff; color: #ffffff; font-weight: bold; background: #0088ff; border-radius: 4px;"
+            # Column 0: Vessel
+            # Column 0: Vessel
+            if master_item.copy_label == "1st":
+                 vessel_display += " 1ST"
+                 lbl = QLabel(vessel_display)
+                 lbl.setAlignment(Qt.AlignCenter)
+                 lbl.setStyleSheet("border: 2px solid #ff0000; color: #ffffff; font-weight: bold; background: #ff0000; border-radius: 4px;")
+                 self.master_table.setCellWidget(row, 0, lbl)
+            elif master_item.copy_label == "2nd":
+                 vessel_display += " 2ND"
+                 lbl = QLabel(vessel_display)
+                 lbl.setAlignment(Qt.AlignCenter)
+                 lbl.setStyleSheet("border: 2px solid #0088ff; color: #ffffff; font-weight: bold; background: #0088ff; border-radius: 4px;")
+                 self.master_table.setCellWidget(row, 0, lbl)
+            else:
+                 self.master_table.setItem(row, 0, QTableWidgetItem(vessel_display))
             
+            # Column 1: FROM {Berth} {Time}
             old_str = f"{old_term.replace('-', '(') + ')'} {format_short_dt(old_eta)}"
-            new_str = f"{new_term.replace('-', '(') + ')'} {format_short_dt(new_eta)}"
-            to_widget_text = None
-            to_widget_style = None
+            self.master_table.setItem(row, 1, QTableWidgetItem(old_str))
             
+            # Column 2: TO {Berth} {Time}
+            new_str = f"{new_term.replace('-', '(') + ')'} {format_short_dt(new_eta)}"
+            
+            # Highlighting Logic
             old_t_name = old_term.split('-')[0]
             new_t_name = new_term.split('-')[0]
             
             color_code = None
             if old_t_name != new_t_name:
-                color_code = "#ff5555"
+                # Terminal changed: Red highlighting
+                color_code = "#ff5555" # Bright Red
             elif old_term != new_term:
-                color_code = "#50fa7b"
+                # Same terminal, different berth: Green highlighting
+                color_code = "#50fa7b" # Bright Green
                 
             if color_code:
-                to_widget_text = new_str
-                to_widget_style = f"border: 2px solid {color_code}; color: {color_code}; font-weight: bold; background: #282a36;"
-            
+                lbl = QLabel(new_str)
+                lbl.setAlignment(Qt.AlignCenter)
+                lbl.setStyleSheet(f"border: 2px solid {color_code}; color: {color_code}; font-weight: bold; background: #282a36;")
+                self.master_table.setCellWidget(row, 2, lbl)
+            else:
+                self.master_table.setItem(row, 2, QTableWidgetItem(new_str))
+
+            # Column 3: Shift
             delta = new_eta - old_eta
             delta_str = format_time_delta(delta)
-            shift_color = None
+            delta_item = QTableWidgetItem(delta_str)
+            delta_item.setTextAlignment(Qt.AlignCenter)
             if delta.total_seconds() != 0:
-                shift_color = "#ffb86c"
-                
-            entry = {
-                'vessel_text': vessel_display,
-                'vessel_widget_text': vessel_widget_text,
-                'vessel_widget_style': vessel_widget_style,
-                'from': old_str,
-                'to_text': new_str,
-                'to_widget_text': to_widget_text,
-                'to_widget_style': to_widget_style,
-                'shift_text': delta_str,
-                'shift_color': shift_color
-            }
-            
-            self.ports[self.active_port_code].master_log_data.append(entry)
-            self.add_master_log_row(entry)
+                delta_item.setForeground(QColor("#ffb86c")) # Orange for shift
+            self.master_table.setItem(row, 3, delta_item)
+
+            self.master_table.scrollToBottom()
+        
+            self.master_table.scrollToBottom()
         
         # Check if this is the first move after copy
+        # Check if this is the first move after copy
         if hasattr(master_item, 'is_just_copied') and master_item.is_just_copied:
-             if hasattr(master_item, 'has_moved_during_drag') and master_item.has_moved_during_drag:
-                 master_item.is_just_copied = False
-                 print("DEBUG: Flag consumed (moved).")
-             else:
-                 print("DEBUG: Flag KEPT (not moved).")
+            print(f"DEBUG: Skipping collision resolution for {master_item.data.get('모선명')}. is_just_copied=True")
+            # Only reset flag if actually dragged (prevent click-consumption)
+            if hasattr(master_item, 'has_moved_during_drag') and master_item.has_moved_during_drag:
+                master_item.is_just_copied = False
+                print("DEBUG: Flag consumed (moved).")
+            else:
+                print("DEBUG: Flag KEPT (not moved).")
         else:
-             self.resolve_collisions(master_item)
-             
+            # print(f"DEBUG: Resolving collisions for {master_item.data.get('모선명')}. is_just_copied={getattr(master_item, 'is_just_copied', 'MISSING')}")
+            self.resolve_collisions(master_item)
+            
         self.update_table()
 
     def resolve_collisions(self, master_item):
@@ -2265,188 +1985,16 @@ class BerthMonitor(QMainWindow):
         
         # Add to Table
         for log in pending_logs:
-            entry = {
-                'name': log['name'],
-                'old_eta': log['old_eta_str'],
-                'new_eta': log['new_eta_str'],
-                'delta_str': format_time_delta(log['delta']) # Assuming stored as timedelta in pending_logs
-            }
-            # Note: pending_logs stored delta, but entry wants delta_str for simple storage
-            # My add_slave_log_row uses 'delta_str'.
+            row = self.slave_table.rowCount()
+            self.slave_table.insertRow(row)
+            self.slave_table.setItem(row, 0, QTableWidgetItem(log['name']))
+            self.slave_table.setItem(row, 1, QTableWidgetItem(log['old_eta_str']))
+            self.slave_table.setItem(row, 2, QTableWidgetItem(log['new_eta_str']))
             
-            self.ports[self.active_port_code].slave_log_data.append(entry)
-            self.add_slave_log_row(entry)
-            
-        self.slave_table.scrollToBottom()
-
-
-    def handle_vessel_move(self, master_item):
-        new_y = master_item.pos().y()
-        term_idx = max(0, min(round(new_y / self.row_height), len(self.terminal_list) - 1))
-        snapped_y = term_idx * self.row_height + 10
-        
-        new_x = master_item.pos().x()
-        hours_from_start = round(new_x / self.pixels_per_hour)
-        snapped_x = hours_from_start * self.pixels_per_hour
-        
-        master_item.setPos(snapped_x, snapped_y)
-        
-        # Snap Width as well
-        current_width = master_item.rect().width()
-        duration_hours = max(1, round(current_width / self.pixels_per_hour))
-        snapped_width = duration_hours * self.pixels_per_hour
-        master_item.setRect(0, 0, snapped_width, master_item.rect().height())
-        master_item.update_time_labels()
-        
-        old_eta = master_item.data['eta']
-        old_term = master_item.data['full_berth']
-        
-        new_eta = self.start_time + timedelta(hours=hours_from_start)
-        new_term = self.terminal_list[term_idx]
-        
-        new_duration = timedelta(hours=duration_hours)
-        new_etd = new_eta + new_duration
-        
-        master_item.data['eta'] = new_eta
-        master_item.data['etd'] = new_etd
-        master_item.data['full_berth'] = new_term
-        parts = new_term.split('-', 1)
-        master_item.data['터미널'] = parts[0]
-        master_item.data['선석'] = parts[1] if len(parts) > 1 else ""
-        
-        master_item.data['접안예정일시'] = format_date(new_eta)
-        master_item.data['출항예정일시'] = format_date(new_etd)
-        
-        master_item.update_time_labels()
-
-        if old_term == new_term and old_eta == new_eta:
-            pass
-        else:
-            vessel_display = master_item.data['모선명'] + " (" + get_display_voyage(master_item.data['선사항차']) + ")"
-            vessel_widget_text = None
-            vessel_widget_style = None
-            
-            if hasattr(master_item, 'copy_label'):
-                if master_item.copy_label == "1st":
-                     vessel_widget_text = vessel_display + " 1ST"
-                     vessel_widget_style = "border: 2px solid #ff0000; color: #ffffff; font-weight: bold; background: #ff0000; border-radius: 4px;"
-                elif master_item.copy_label == "2nd":
-                     vessel_widget_text = vessel_display + " 2ND"
-                     vessel_widget_style = "border: 2px solid #0088ff; color: #ffffff; font-weight: bold; background: #0088ff; border-radius: 4px;"
-            
-            old_str = f"{old_term.replace('-', '(') + ')'} {format_short_dt(old_eta)}"
-            new_str = f"{new_term.replace('-', '(') + ')'} {format_short_dt(new_eta)}"
-            to_widget_text = None
-            to_widget_style = None
-            
-            old_t_name = old_term.split('-')[0]
-            new_t_name = new_term.split('-')[0]
-            
-            color_code = None
-            if old_t_name != new_t_name:
-                color_code = "#ff5555"
-            elif old_term != new_term:
-                color_code = "#50fa7b"
-                
-            if color_code:
-                to_widget_text = new_str
-                to_widget_style = f"border: 2px solid {color_code}; color: {color_code}; font-weight: bold; background: #282a36;"
-            
-            delta = new_eta - old_eta
-            delta_str = format_time_delta(delta)
-            shift_color = None
-            if delta.total_seconds() != 0:
-                shift_color = "#ffb86c"
-                
-            entry = {
-                'vessel_text': vessel_display,
-                'vessel_widget_text': vessel_widget_text,
-                'vessel_widget_style': vessel_widget_style,
-                'from': old_str,
-                'to_text': new_str,
-                'to_widget_text': to_widget_text,
-                'to_widget_style': to_widget_style,
-                'shift_text': delta_str,
-                'shift_color': shift_color
-            }
-            
-            self.ports[self.active_port_code].master_log_data.append(entry)
-            self.add_master_log_row(entry)
-        
-        if hasattr(master_item, 'is_just_copied') and master_item.is_just_copied:
-             if hasattr(master_item, 'has_moved_during_drag') and master_item.has_moved_during_drag:
-                 master_item.is_just_copied = False
-             else:
-                 pass
-        else:
-             self.resolve_collisions(master_item)
-             
-        self.update_table()
-
-    def resolve_collisions(self, master_item):
-        master_eta = master_item.data['eta']
-        master_etd = master_item.data['etd']
-        master_berth = master_item.data['full_berth']
-        
-        overlapping = []
-        for item in self.vessel_items:
-            if item is master_item: continue
-            if item.data['full_berth'] != master_berth: continue
-            
-            item_eta = item.data['eta']
-            item_etd = item.data['etd']
-            
-            if not (item_etd <= master_eta or item_eta >= master_etd):
-                overlapping.append(item)
-        
-        if not overlapping: return
-        
-        overlapping.sort(key=lambda x: x.data['eta'])
-        
-        pending_logs = []
-        
-        for v in overlapping:
-            old_eta = v.data['eta']
-            
-            new_eta = master_etd + timedelta(hours=self.safety_gap_h)
-            duration = v.data['etd'] - v.data['eta']
-            new_etd = new_eta + duration
-            
-            v.data['eta'] = new_eta
-            v.data['etd'] = new_etd
-            v.data['접안예정일시'] = format_date(new_eta)
-            v.data['출항예정일시'] = format_date(new_etd)
-            
-            hours_from_start = (new_eta - self.start_time).total_seconds() / 3600
-            new_x = hours_from_start * self.pixels_per_hour
-            v.setPos(new_x, v.pos().y())
-            v.update_time_labels()
-            
-            master_etd = new_etd
-            
-            total_delta = new_eta - old_eta
-            if abs(total_delta.total_seconds()) >= 3600:
-                pending_logs.append({
-                     'vessel': v,
-                     'name': v.data['모선명'] + " (" + get_display_voyage(v.data['선사항차']) + ")",
-                     'old_eta_str': format_short_dt(old_eta),
-                     'new_eta_str': format_short_dt(new_eta),
-                     'delta': total_delta,
-                     'delta_str': format_time_delta(total_delta)
-                 })
-
-        pending_logs.sort(key=lambda x: abs(x['delta'].total_seconds()), reverse=True)
-        
-        for log in pending_logs:
-            entry = {
-                'name': log['name'],
-                'old_eta': log['old_eta_str'],
-                'new_eta': log['new_eta_str'],
-                'delta_str': format_time_delta(log['delta'])
-            }
-            
-            self.ports[self.active_port_code].slave_log_data.append(entry)
-            self.add_slave_log_row(entry)
+            delta_item = QTableWidgetItem(log['delta_str'])
+            delta_item.setTextAlignment(Qt.AlignCenter)
+            delta_item.setForeground(QColor("#ffb86c"))
+            self.slave_table.setItem(row, 3, delta_item)
             
         self.slave_table.scrollToBottom()
 
