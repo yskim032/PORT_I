@@ -178,43 +178,85 @@ class ZoomableGraphicsView(QGraphicsView):
 class TickerLabel(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.full_text = ""
+        self.segments = [] # List of (text, color)
         self.offset = 0
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.update_offset)
         self.timer.start(30) # ~33 FPS
         self.setFixedHeight(30)
+        self.total_text_width = 0
         
-    def set_text(self, text):
-        if text != self.full_text:
-            self.full_text = text
-            self.offset = 0
+    def set_text_segments(self, segments):
+        if segments != self.segments:
+            self.segments = segments
+            # Calculate total width
+            fm = self.fontMetrics()
+            spacer_width = fm.horizontalAdvance("    ★    ")
+            self.total_text_width = 0
+            for i, (text, color) in enumerate(self.segments):
+                self.total_text_width += fm.horizontalAdvance(text)
+                if i < len(self.segments) - 1:
+                    self.total_text_width += spacer_width
+            
+            # Reset offset if needed
+            if self.offset > self.total_text_width:
+                self.offset = 0
             self.update()
             
+    def set_text(self, text):
+        # Legacy support
+        self.set_text_segments([(text, QColor("#50fa7b"))])
+            
     def update_offset(self):
-        if not self.full_text: return
+        if not self.segments or self.total_text_width == 0: return
         self.offset += 1
-        font_metrics = self.fontMetrics()
-        text_width = font_metrics.horizontalAdvance(self.full_text)
-        if self.offset > text_width + self.width():
-            self.offset = -self.width()
+        
+        # Loop logic: Reset when the first set has scrolled past
+        # We draw the sequence twice to make it seamless.
+        # But we only need to reset when we've moved by total_text_width + spacer
+        fm = self.fontMetrics()
+        spacer_width = fm.horizontalAdvance("    ★    ")
+        cycle_width = self.total_text_width + spacer_width
+        
+        if self.offset >= cycle_width:
+            self.offset = 0
         self.update()
         
     def paintEvent(self, event):
         painter = QPainter(self)
         painter.fillRect(self.rect(), QColor(0, 0, 0)) # Black background
         
-        painter.setPen(QColor("#50fa7b")) # Bright Green
+        if not self.segments: return
+        
         painter.setFont(QFont("Segoe UI", 10, QFont.Bold))
+        fm = painter.fontMetrics()
+        spacer = "    ★    "
+        spacer_width = fm.horizontalAdvance(spacer)
+        y = (self.height() + fm.ascent() - fm.descent()) / 2
         
-        font_metrics = painter.fontMetrics()
-        text_width = font_metrics.horizontalAdvance(self.full_text)
-        y = (self.height() + font_metrics.ascent() - font_metrics.descent()) / 2
+        # Loop logic: Draw the content twice to ensure no gaps
+        # Position: Starts from width and moves left
+        start_x = self.width() - self.offset
         
-        # Draw the text at the current offset
-        # Offset 0 means text starts at the right edge
-        x = self.width() - self.offset
-        painter.drawText(int(x), int(y), self.full_text)
+        def draw_sequence(current_x):
+            for i, (text, color) in enumerate(self.segments):
+                painter.setPen(color)
+                painter.drawText(int(current_x), int(y), text)
+                current_x += fm.horizontalAdvance(text)
+                
+                # Draw spacer
+                if i < len(self.segments) - 1 or True: # Always draw spacer for looping
+                    painter.setPen(QColor("#a9b1d6")) # Greyish spacer
+                    painter.drawText(int(current_x), int(y), spacer)
+                    current_x += spacer_width
+            return current_x
+
+        # Draw first sequence
+        next_x = draw_sequence(start_x)
+        
+        # Draw second sequence immediately after the first to fill the gap during loop
+        if next_x < self.width() + self.total_text_width:
+            draw_sequence(next_x)
 
 # --- Graphic Items ---
 class ArrowItem(QGraphicsLineItem):
@@ -862,10 +904,10 @@ class BerthMonitor(QMainWindow):
         self.time_update_timer.timeout.connect(self.update_current_time_display)
         self.time_update_timer.start(1000)  # Update every 1 second
         
-        # Ticker Update Timer (5 seconds)
+        # Ticker Update Timer (1 second)
         self.ticker_timer = QTimer()
         self.ticker_timer.timeout.connect(self.update_ticker_content)
-        self.ticker_timer.start(5000)
+        self.ticker_timer.start(1000)
         
         self.is_dark_mode = True # Default to Dark Mode
         
@@ -2713,40 +2755,64 @@ class BerthMonitor(QMainWindow):
         self.scene.addItem(self.current_time_text)
 
     def update_ticker_content(self):
-        """Gather and format data for the scrolling news ticker"""
+        """Gather and format data for the scrolling news ticker with colored segments"""
         now = datetime.now()
-        messages = []
+        segments = [] # List of (text, color)
         
-        # 1. In-Port Vessels (Red Outline)
+        # 1. Off-work countdown (6 PM) and Weekend info - Bright Pink (#ff69b4)
+        pink_color = QColor("#ff69b4")
+        green_color = QColor("#50fa7b")
+        
+        # Off-work countdown
+        off_work_time = now.replace(hour=18, minute=0, second=0, microsecond=0)
+        if now < off_work_time:
+            diff = off_work_time - now
+            h = diff.seconds // 3600
+            m = (diff.seconds % 3600) // 60
+            s = diff.seconds % 60
+            segments.append((f"⏰ 퇴근까지 남은 시간: {h:02d}:{m:02d}:{s:02d}", pink_color))
+        else:
+            segments.append(("🎉 퇴근 시간이 지났습니다! 고생하셨습니다!", pink_color))
+            
+        # Weekend info (Days until Saturday)
+        # Weekday: Mon=0, ..., Fri=4, Sat=5, Sun=6
+        current_weekday = now.weekday()
+        if current_weekday < 5: # Mon-Fri
+            days_to_weekend = 5 - current_weekday
+            segments.append((f"📅 주말까지 {days_to_weekend}일 남았습니다!", pink_color))
+        elif current_weekday == 5:
+            segments.append(("💃 오늘은 즐거운 토요일입니다!", pink_color))
+        else:
+            segments.append(("🛌 오늘은 편안한 일요일입니다!", pink_color))
+
+        # 2. In-Port Vessels (Red Outline) - Bright Green (#50fa7b)
         connected_vessels = []
         if hasattr(self, 'vessel_items') and self.vessel_items:
             for v in self.vessel_items:
                 if v.is_in_port:
                     remaining = v.data['etd'] - now
                     hours = remaining.total_seconds() / 3600
-                    if hours < 0: hours = 0 # Already passed but highlight might linger
+                    if hours < 0: hours = 0 
                     v_name = v.data.get('모선명', 'Unknown')
                     connected_vessels.append(f"🚢 [{v_name}] IN PORT - {hours:.1f}H Left")
         
         if connected_vessels:
-            messages.append(" | ".join(connected_vessels))
+            segments.append((" | ".join(connected_vessels), green_color))
             
-        # 2. Memos
+        # 3. Memos - Bright Green (#50fa7b)
         memo_messages = []
         for key, text in self.memo_data.items():
             if text.strip():
-                # Key format: "Name|Voyage"
                 v_name = key.split('|')[0] if '|' in key else key
                 memo_messages.append(f"📝 {v_name}: {text}")
         
         if memo_messages:
-            messages.append(" | ".join(memo_messages))
+            segments.append((" | ".join(memo_messages), green_color))
             
-        full_ticker_str = "    ★    ".join(messages)
-        if not full_ticker_str:
-            full_ticker_str = "WELCOME TO BERTH SIMULATION MONITOR ... NO ACTIVE EVENTS AT THE MOMENT ..."
+        if not segments:
+            segments.append(("WELCOME TO BERTH SIMULATION MONITOR ... NO ACTIVE EVENTS ...", green_color))
             
-        self.ticker.set_text(full_ticker_str)
+        self.ticker.set_text_segments(segments)
 
     def get_original_data(self, current_data):
         key_name = current_data['모선명']
