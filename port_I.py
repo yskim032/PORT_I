@@ -2799,15 +2799,16 @@ class BerthMonitor(QMainWindow):
         if connected_vessels:
             segments.append((" | ".join(connected_vessels), green_color))
             
-        # 3. Memos - Bright Green (#50fa7b)
+        # 3. Memos - Bright Blue (#00bfff)
+        blue_color = QColor("#00bfff")
         memo_messages = []
         for key, text in self.memo_data.items():
             if text.strip():
                 v_name = key.split('|')[0] if '|' in key else key
-                memo_messages.append(f"📝 {v_name}: {text}")
+                memo_messages.append(f"🚢 [{v_name}] {text} {{이 메모의 내용을 확인하고 꼭 실행 하시기 바랍니다}}")
         
         if memo_messages:
-            segments.append((" | ".join(memo_messages), green_color))
+            segments.append((" | ".join(memo_messages), blue_color))
             
         if not segments:
             segments.append(("WELCOME TO BERTH SIMULATION MONITOR ... NO ACTIVE EVENTS ...", green_color))
