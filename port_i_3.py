@@ -175,47 +175,6 @@ class ZoomableGraphicsView(QGraphicsView):
             painter.drawLine(QLineF(visible_left, y + row_height, visible_left + 150, y + row_height))
             painter.setPen(QColor("#c0caf5")) # Reset text color
 
-class TickerLabel(QWidget):
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.full_text = ""
-        self.offset = 0
-        self.timer = QTimer(self)
-        self.timer.timeout.connect(self.update_offset)
-        self.timer.start(30) # ~33 FPS
-        self.setFixedHeight(30)
-        
-    def set_text(self, text):
-        if text != self.full_text:
-            self.full_text = text
-            self.offset = 0
-            self.update()
-            
-    def update_offset(self):
-        if not self.full_text: return
-        self.offset += 1
-        font_metrics = self.fontMetrics()
-        text_width = font_metrics.horizontalAdvance(self.full_text)
-        if self.offset > text_width + self.width():
-            self.offset = -self.width()
-        self.update()
-        
-    def paintEvent(self, event):
-        painter = QPainter(self)
-        painter.fillRect(self.rect(), QColor(0, 0, 0)) # Black background
-        
-        painter.setPen(QColor("#50fa7b")) # Bright Green
-        painter.setFont(QFont("Segoe UI", 10, QFont.Bold))
-        
-        font_metrics = painter.fontMetrics()
-        text_width = font_metrics.horizontalAdvance(self.full_text)
-        y = (self.height() + font_metrics.ascent() - font_metrics.descent()) / 2
-        
-        # Draw the text at the current offset
-        # Offset 0 means text starts at the right edge
-        x = self.width() - self.offset
-        painter.drawText(int(x), int(y), self.full_text)
-
 # --- Graphic Items ---
 class ArrowItem(QGraphicsLineItem):
     def __init__(self, start_pos, end_pos, color, parent=None):
@@ -862,11 +821,6 @@ class BerthMonitor(QMainWindow):
         self.time_update_timer.timeout.connect(self.update_current_time_display)
         self.time_update_timer.start(1000)  # Update every 1 second
         
-        # Ticker Update Timer (5 seconds)
-        self.ticker_timer = QTimer()
-        self.ticker_timer.timeout.connect(self.update_ticker_content)
-        self.ticker_timer.start(5000)
-        
         self.is_dark_mode = True # Default to Dark Mode
         
         self.initUI()
@@ -982,12 +936,7 @@ class BerthMonitor(QMainWindow):
         self.port_corner_container = QWidget()
         pc_layout = QHBoxLayout(self.port_corner_container)
         pc_layout.setContentsMargins(0, 0, 5, 5) # Right/Bottom margin for alignment
-        pc_layout.setSpacing(10)
-        
-        # News Ticker
-        self.ticker = TickerLabel()
-        self.ticker.setMinimumWidth(900)
-        pc_layout.addWidget(self.ticker)
+        pc_layout.setSpacing(5)
         
         self.btn_minimize_port = QPushButton("―")
         self.btn_minimize_port.setFixedSize(30, 30)
@@ -2711,42 +2660,6 @@ class BerthMonitor(QMainWindow):
         # Add to scene
         self.scene.addItem(self.current_time_box)
         self.scene.addItem(self.current_time_text)
-
-    def update_ticker_content(self):
-        """Gather and format data for the scrolling news ticker"""
-        now = datetime.now()
-        messages = []
-        
-        # 1. In-Port Vessels (Red Outline)
-        connected_vessels = []
-        if hasattr(self, 'vessel_items') and self.vessel_items:
-            for v in self.vessel_items:
-                if v.is_in_port:
-                    remaining = v.data['etd'] - now
-                    hours = remaining.total_seconds() / 3600
-                    if hours < 0: hours = 0 # Already passed but highlight might linger
-                    v_name = v.data.get('모선명', 'Unknown')
-                    connected_vessels.append(f"🚢 [{v_name}] IN PORT - {hours:.1f}H Left")
-        
-        if connected_vessels:
-            messages.append(" | ".join(connected_vessels))
-            
-        # 2. Memos
-        memo_messages = []
-        for key, text in self.memo_data.items():
-            if text.strip():
-                # Key format: "Name|Voyage"
-                v_name = key.split('|')[0] if '|' in key else key
-                memo_messages.append(f"📝 {v_name}: {text}")
-        
-        if memo_messages:
-            messages.append(" | ".join(memo_messages))
-            
-        full_ticker_str = "    ★    ".join(messages)
-        if not full_ticker_str:
-            full_ticker_str = "WELCOME TO BERTH SIMULATION MONITOR ... NO ACTIVE EVENTS AT THE MOMENT ..."
-            
-        self.ticker.set_text(full_ticker_str)
 
     def get_original_data(self, current_data):
         key_name = current_data['모선명']
