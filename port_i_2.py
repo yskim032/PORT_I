@@ -8,11 +8,10 @@ from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QHeaderView, QLabel, QSplitter, QGraphicsView, QGraphicsScene,
                              QGraphicsRectItem, QGraphicsTextItem, QGraphicsItem, QGraphicsLineItem,
                              QDialog, QTabWidget, QCheckBox, QGroupBox, QScrollArea, QFrame,
-                             QFileDialog, QHeaderView, QTextEdit, QColorDialog)
+                             QFileDialog, QHeaderView)
 from PyQt5.QtGui import QColor, QFont, QBrush, QPen, QPainter, QWheelEvent, QPolygonF, QPainterPath
 from PyQt5.QtCore import Qt, QRectF, pyqtSignal, QObject, QTimer, QLineF, QPointF
 import math
-import random
 
 
 # pyinstaller -w -F port_i.py
@@ -277,7 +276,6 @@ class VesselItem(QGraphicsRectItem):
         self.copy_border_color = None  # None, QColor for border
         self.linked_vessel = None  # Reference to paired vessel (for copy feature)
         self.connection_line = None  # Reference to ConnectionLineItem
-        self.is_dragging_for_connection = False  # Flag to prevent itemChange updates during drag
         
         # Highlight Mode
         self.is_highlighted = False
@@ -288,13 +286,13 @@ class VesselItem(QGraphicsRectItem):
         # Connect Mode
         self.temp_line = None
         
+        # Flag for deferred shifting
+        self.is_just_copied = False
+        self.has_moved_during_drag = False  # Track if moved during current press sequence
+        
         # MEMO & Heart Icon
         self.has_memo = False
         self.heart_rotation = 0
-        
-        # SEARCH Flag
-        self.is_searched = False
-        self.is_search_focused = False # New state for RED/2x checkmark
         
         # Main Text Label: 
         # Line 1: Vessel Name, Voyage
@@ -369,51 +367,6 @@ class VesselItem(QGraphicsRectItem):
             # Simple Circle
             # Radius ~5 (base size before scale)
             painter.drawEllipse(QPointF(cx, cy), 5, 5)
-            
-            painter.drawEllipse(QPointF(cx, cy), 5, 5)
-            
-            painter.restore()
-
-        # Draw SEARCH Checkmark
-        if self.is_searched:
-            painter.save()
-            
-            # Request: Checkmark on TOP-RIGHT, slightly outside box allowed.
-            # Normal: Green, 1.5x
-            # Focused: Red, 2x
-            
-            # Base position: Top-Right corner
-            # Translate to (Width, 0)
-            painter.translate(self.rect().width(), 0)
-            
-            check_path = QPainterPath()
-            color = QColor("#00ff00")
-            scale = 1.5
-            pen_width = 5
-            
-            if self.is_search_focused:
-                color = QColor("#ff0000") # Red
-                scale = 2.0
-                pen_width = 6
-                
-            # Base Checkmark Path (Standard Size ~10x10 box)
-            # (2,8) -> (6,12) -> (14,2)
-            # We want it "slightly outside" or just top right.
-            # Let's center it around (0,0) relative to Top-Right?
-            # Or just shifted slightly left so it hangs off the corner?
-            # Let's start path at (-5, 5) roughly.
-            
-            # Define path at origin (0,0) being the corner
-            # A checkmark shape
-            check_path.moveTo(-8 * scale, 4 * scale)      # Left point
-            check_path.lineTo(-4 * scale, 8 * scale)      # Bottom point
-            check_path.lineTo(8 * scale, -8 * scale)      # Top Right point (outside)
-            
-            pen = QPen(color, pen_width) 
-            pen.setCapStyle(Qt.RoundCap)
-            pen.setJoinStyle(Qt.RoundJoin)
-            painter.setPen(pen)
-            painter.drawPath(check_path)
             
             painter.restore()
 
@@ -614,34 +567,7 @@ class VesselItem(QGraphicsRectItem):
             self.update_time_labels()
         else:
             self.has_moved_during_drag = True # Mark as dragged
-            
-            # UPDATE: Temporarily update ETA during drag for real-time connection line
-            if hasattr(scene, 'parent_view'):
-                parent_view = scene.parent_view
-                # Use scene position for more accurate calculation
-                current_scene_x = event.scenePos().x()
-                hours_from_start = current_scene_x / parent_view.pixels_per_hour
-                temp_eta = parent_view.start_time + timedelta(hours=hours_from_start)
-                
-                # Set flag to prevent itemChange from updating
-                self.is_dragging_for_connection = True
-                
-                # Temporarily update data for connection line calculation
-                # Don't restore it - let it stay until after itemChange
-                self.data['eta'] = temp_eta
-                
-                # Update connection line if it exists
-                if self.connection_line:
-                    self.connection_line.update_line()
-                    # Explicitly trigger repaint
-                    self.connection_line.update()
-                    self.connection_line.label.update()
-            
             super().mouseMoveEvent(event)
-            
-            # Reset flag AFTER super() completes
-            if hasattr(scene, 'parent_view') and self.connection_line:
-                self.is_dragging_for_connection = False
 
     def mouseReleaseEvent(self, event):
         scene = self.scene()
@@ -710,8 +636,8 @@ class VesselItem(QGraphicsRectItem):
     def itemChange(self, change, value):
         """Override to update connection line when vessel moves"""
         if change == QGraphicsItem.ItemPositionHasChanged:
-            # Update connection line if it exists (but not during drag)
-            if self.connection_line and not self.is_dragging_for_connection:
+            # Update connection line if it exists
+            if self.connection_line:
                 self.connection_line.update_line()
         return super().itemChange(change, value)
 
@@ -802,27 +728,8 @@ class BerthMonitor(QMainWindow):
         self.anim_timer.timeout.connect(self.update_animation)
         self.anim_timer.start(50) 
         
-        # Current Time Display Components
-        self.current_time_text = None  # QGraphicsTextItem
-        self.current_time_box = None   # QGraphicsRectItem
-        self.current_time_line = None  # QGraphicsLineItem (vertical line)
-        
-        # Current Time Update Timer (1 second)
-        self.time_update_timer = QTimer()
-        self.time_update_timer.timeout.connect(self.update_current_time_display)
-        self.time_update_timer.start(1000)  # Update every 1 second
-        
-        self.is_dark_mode = True # Default to Dark Mode
-        
         self.initUI()
         self.apply_styles()
-        
-        # Auto-load last mapping if exists
-        last_map = get_last_mapping_path()
-        if last_map and os.path.exists(last_map):
-             self.load_mappings(last_map)
-             print(f"Auto-loaded mapping from: {last_map}")
-             
         self.current_view_mode = "NORMAL"
 
     def initUI(self):
@@ -841,28 +748,28 @@ class BerthMonitor(QMainWindow):
         
         # MEMO Button (Left of Copy)
         self.btn_memo = QPushButton()
-        self.btn_memo.setText("MEMO\noff")
+        self.btn_memo.setText("❤ MEMO\noff")
         self.btn_memo.setFixedSize(160, 45)
         self.btn_memo.setCheckable(True)
         self.btn_memo.clicked.connect(self.toggle_memo_mode)
         header_layout.addWidget(self.btn_memo)
 
         self.copy_btn = QPushButton()
-        self.copy_btn.setText("Vessel Copy\noff")
+        self.copy_btn.setText("📋 Vessel Copy\noff")
         self.copy_btn.setFixedSize(160, 45)
         self.copy_btn.setCheckable(True)
         self.copy_btn.clicked.connect(self.toggle_copy_mode)
         header_layout.addWidget(self.copy_btn)
         
         self.highlight_btn = QPushButton()
-        self.highlight_btn.setText("Highlight Mode\noff")
+        self.highlight_btn.setText("✨ Highlight Mode\noff")
         self.highlight_btn.setFixedSize(160, 45)
         self.highlight_btn.setCheckable(True)
         self.highlight_btn.clicked.connect(self.toggle_highlight_mode)
         header_layout.addWidget(self.highlight_btn)
 
         self.connect_btn = QPushButton()
-        self.connect_btn.setText("Connect Mode\noff")
+        self.connect_btn.setText("🔗 Connect Mode\noff")
         self.connect_btn.setFixedSize(160, 45)
         self.connect_btn.setCheckable(True)
         self.connect_btn.clicked.connect(self.toggle_connect_mode)
@@ -922,27 +829,6 @@ class BerthMonitor(QMainWindow):
              self.port_tabs.addTab(view, name)
              
         self.port_tabs.currentChanged.connect(self.switch_port)
-
-        # Minimize and Shutdown Buttons for Port Tabs
-        self.port_corner_container = QWidget()
-        pc_layout = QHBoxLayout(self.port_corner_container)
-        pc_layout.setContentsMargins(0, 0, 5, 5) # Right/Bottom margin for alignment
-        pc_layout.setSpacing(5)
-        
-        self.btn_minimize_port = QPushButton("―")
-        self.btn_minimize_port.setFixedSize(30, 30)
-        self.btn_minimize_port.clicked.connect(self.showMinimized)
-        self.btn_minimize_port.setStyleSheet("background-color: #414868; color: white;")
-        pc_layout.addWidget(self.btn_minimize_port)
-        
-        self.btn_shutdown_port = QPushButton("✕")
-        self.btn_shutdown_port.setFixedSize(30, 30)
-        self.btn_shutdown_port.clicked.connect(self.shutdown_app)
-        self.btn_shutdown_port.setStyleSheet("background-color: #f7768e; color: white;") 
-        pc_layout.addWidget(self.btn_shutdown_port)
-        
-        self.port_tabs.setCornerWidget(self.port_corner_container, Qt.TopRightCorner)
-
         
         gc_layout.addWidget(self.port_tabs)
         self.upper_splitter.addWidget(self.graphic_container)
@@ -957,7 +843,19 @@ class BerthMonitor(QMainWindow):
         self.tabs.setStyleSheet("""
             QTabWidget::pane { border: 1px solid #414868; background: #1f2335; }
             QTabBar::tab { background: #1a1b26; color: #a9b1d6; padding: 8px 12px; border: 1px solid #414868; border-bottom: none; border-top-left-radius: 4px; border-top-right-radius: 4px; }
-            QTabBar::tab:selected { background: #7aa2f7; color: #1a1b26; font-weight: bold; }
+        # --- TAB 3: MAPPING ---
+        self.create_mapping_tab()
+        
+        # --- TAB 4: MEMO ---
+        self.create_memo_tab()
+        
+        # Add Tabs to Sidebar
+        self.tabs.addTab(self.tab_logs, "LOGS")
+        self.tabs.addTab(self.tab_filters, "FILTERS")
+        self.tabs.addTab(self.tab_mapping, "MAPPING")
+        self.tabs.addTab(self.tab_memo, "MEMO")
+        
+        sidebar_layout.addWidget(self.tabs)
             QTabBar::tab:hover { background: #24283b; }
         """)
         
@@ -992,7 +890,7 @@ class BerthMonitor(QMainWindow):
         
         # SLAVE CHANGES
         slave_header = QHBoxLayout()
-        slave_header.addWidget(QLabel("<br><b>[ SLAVE CHANGES ]</b>"))
+        slave_header.addWidget(QLabel("<br><b>[ SLAVE CHANGES LOG ]</b>"))
         slave_header.addStretch()
         self.btn_pop_slave = QPushButton("↗")
         self.btn_pop_slave.setFixedSize(30, 25)
@@ -1050,26 +948,6 @@ class BerthMonitor(QMainWindow):
         self.tabs.addTab(self.tab_mapping, "MAPPING")
         self.tabs.addTab(self.tab_memo, "MEMO")
         
-        # --- TAB 5: SEARCH ---
-        self.create_search_tab()
-        self.tabs.addTab(self.tab_search, "SEARCH")
-        
-        # --- Theme Toggle Button (Corner Widget) ---
-        self.theme_container = QWidget()
-        theme_layout = QHBoxLayout(self.theme_container)
-        theme_layout.setContentsMargins(50, 0, 20, 35) # Increased bottom margin to move button up
-        theme_layout.setSpacing(0)
-        
-        self.btn_theme = QPushButton(" 🌙 ") # Initial: Dark Mode icon
-        self.btn_theme.setCursor(Qt.PointingHandCursor)
-        self.btn_theme.setFixedSize(30, 30) # Slightly smaller to fit better
-        self.btn_theme.setStyleSheet("border: none; background: transparent; font-size: 16px;")
-        self.btn_theme.clicked.connect(self.toggle_theme)
-        
-        theme_layout.addWidget(self.btn_theme)
-        
-        self.tabs.setCornerWidget(self.theme_container, Qt.TopRightCorner)
-        
         sidebar_layout.addWidget(self.tabs)
         
         self.upper_splitter.addWidget(self.sidebar)
@@ -1092,99 +970,36 @@ class BerthMonitor(QMainWindow):
         # Set initial refs for KRPUS (Default Tab 0 aka Active)
         self.gv, self.scene = self.port_views['KRPUS']
 
-    def toggle_theme(self):
-        self.is_dark_mode = not self.is_dark_mode
-        self.apply_styles()
-
     def apply_styles(self):
-        if self.is_dark_mode:
-            # --- DARK MODE COLORS ---
-            bg_main = "#1a1b26"
-            bg_sidebar = "#1f2335"
-            bg_widget = "#16161e"
-            bg_table = "#24283b"
-            bg_header = "#1f2335"
-            text_main = "#a9b1d6"
-            text_header = "#7aa2f7"
-            accent = "#7aa2f7"
-            border = "#414868"
-            btn_bg = "#7aa2f7"
-            btn_text = "#1a1b26"
-            btn_hover = "#89ddff"
-            btn_disabled_bg = "#414868"
-            btn_disabled_text = "#565f89"
-            
-            self.btn_theme.setText(" 🌙 ")
-            self.btn_theme.setStyleSheet("border: none; background: transparent; font-size: 20px; color: #a9b1d6;")
-            
-            search_input_style = f"background-color: {bg_table}; color: {text_main}; border: 1px solid {border};"
-            
-        else:
-            # --- LIGHT MODE COLORS ---
-            bg_main = "#f0f2f5"
-            bg_sidebar = "#ffffff"
-            bg_widget = "#ffffff"
-            bg_table = "#ffffff"
-            bg_header = "#e4e4e7"
-            text_main = "#333333"
-            text_header = "#2563eb" # Blue-600
-            accent = "#2563eb"
-            border = "#d1d5db"
-            btn_bg = "#3b82f6" # Blue-500
-            btn_text = "#ffffff"
-            btn_hover = "#60a5fa"
-            btn_disabled_bg = "#e5e7eb"
-            btn_disabled_text = "#9ca3af"
-            
-            self.btn_theme.setText(" ☀️ ")
-            self.btn_theme.setStyleSheet("border: none; background: transparent; font-size: 20px; color: #f59e0b;") # Orange sun
-            
-            search_input_style = f"background-color: {bg_widget}; color: {text_main}; border: 1px solid {border};"
-
-        # MAIN STYLESHEET
-        self.setStyleSheet(f"""
-            QMainWindow, QWidget#centralWidget {{ background-color: {bg_main}; }}
-            QWidget {{ color: {text_main}; font-family: 'Segoe UI', sans-serif; }}
-            #titleLabel {{ font-size: 20px; font-weight: bold; color: {accent}; margin: 10px; }}
-            QPushButton {{ background-color: {btn_bg}; color: {btn_text}; border-radius: 8px; font-weight: bold; font-size: 14px; }}
-            QPushButton:hover {{ background-color: {btn_hover}; }}
-            QPushButton:disabled {{ background-color: {btn_disabled_bg}; color: {btn_disabled_text}; }}
-            QGraphicsView {{ background-color: {bg_widget}; border: 1px solid {border}; border-radius: 10px; }}
-            QTableWidget {{ background-color: {bg_table}; gridline-color: {border}; color: {text_main}; border: none; }}
-            QHeaderView::section {{ background-color: {bg_header}; color: {text_header}; padding: 8px; border: 1px solid {border}; font-weight: bold; font-size: 11px; }}
-            QTableCornerButton::section {{ background-color: {bg_header}; border: 1px solid {border}; }}
-            QScrollBar:vertical {{ border: none; background: {bg_widget}; width: 14px; margin: 0px 0px 0px 0px; }}
-            QScrollBar::handle:vertical {{ background: {border}; min-height: 30px; border-radius: 7px; }}
-            QScrollBar::handle:vertical:hover {{ background: {btn_disabled_text}; }}
-            QScrollBar::sub-line:vertical {{ border: none; background: none; height: 0px; }}
-            QScrollBar::add-line:vertical {{ border: none; background: none; height: 0px; }}
-            QScrollBar:horizontal {{ border: none; background: {bg_widget}; height: 14px; margin: 0px 0px 0px 0px; }}
-            QScrollBar::handle:horizontal {{ background: {border}; min-width: 30px; border-radius: 7px; }}
-            QScrollBar::handle:horizontal:hover {{ background: {btn_disabled_text}; }}
-            QScrollBar::sub-line:horizontal {{ border: none; background: none; width: 0px; }}
-            QScrollBar::add-line:horizontal {{ border: none; background: none; width: 0px; }}
-            #sidebar {{ background-color: {bg_sidebar}; border-left: 2px solid {border}; padding: 5px; }}
-            QDialog {{ background-color: {bg_main}; }}
-            QCheckBox {{ spacing: 5px; color: {text_main}; }}
-            QCheckBox::indicator {{ width: 18px; height: 18px; border-radius: 3px; border: 1px solid {btn_disabled_text}; background: {bg_widget}; }}
-            QCheckBox::indicator:checked {{ background: {accent}; border: 1px solid {accent}; image: url(:/qt-project.org/styles/commonstyle/images/standardbutton-apply-16.png); }}
-            QGroupBox {{ border: 1px solid {border}; border-radius: 5px; margin-top: 20px; font-weight: bold; color: {accent}; }}
-            QGroupBox::title {{ subcontrol-origin: margin; left: 10px; padding: 0 5px; }}
+        self.setStyleSheet("""
+            QMainWindow, QWidget#centralWidget { background-color: #1a1b26; }
+            QWidget { color: #a9b1d6; font-family: 'Segoe UI', sans-serif; }
+            #titleLabel { font-size: 20px; font-weight: bold; color: #7aa2f7; margin: 10px; }
+            QPushButton { background-color: #7aa2f7; color: #1a1b26; border-radius: 8px; font-weight: bold; font-size: 14px; }
+            QPushButton:hover { background-color: #89ddff; }
+            QPushButton:disabled { background-color: #414868; color: #565f89; }
+            QGraphicsView { background-color: #16161e; border: 1px solid #24283b; border-radius: 10px; }
+            QTableWidget { background-color: #24283b; gridline-color: #414868; color: #c0caf5; border: none; }
+            QHeaderView::section { background-color: #1f2335; color: #7aa2f7; padding: 8px; border: 1px solid #414868; font-weight: bold; font-size: 11px; }
+            QTableCornerButton::section { background-color: #1f2335; border: 1px solid #414868; }
+            QScrollBar:vertical { border: none; background: #16161e; width: 14px; margin: 0px 0px 0px 0px; }
+            QScrollBar::handle:vertical { background: #414868; min-height: 30px; border-radius: 7px; }
+            QScrollBar::handle:vertical:hover { background: #565f89; }
+            QScrollBar::sub-line:vertical { border: none; background: none; height: 0px; }
+            QScrollBar::add-line:vertical { border: none; background: none; height: 0px; }
+            QScrollBar:horizontal { border: none; background: #16161e; height: 14px; margin: 0px 0px 0px 0px; }
+            QScrollBar::handle:horizontal { background: #414868; min-width: 30px; border-radius: 7px; }
+            QScrollBar::handle:horizontal:hover { background: #565f89; }
+            QScrollBar::sub-line:horizontal { border: none; background: none; width: 0px; }
+            QScrollBar::add-line:horizontal { border: none; background: none; width: 0px; }
+            #sidebar { background-color: #1f2335; border-left: 2px solid #24283b; padding: 5px; }
+            QDialog { background-color: #1a1b26; }
+            QCheckBox { spacing: 5px; color: #a9b1d6; }
+            QCheckBox::indicator { width: 18px; height: 18px; border-radius: 3px; border: 1px solid #565f89; background: #16161e; }
+            QCheckBox::indicator:checked { background: #7aa2f7; border: 1px solid #7aa2f7; image: url(:/qt-project.org/styles/commonstyle/images/standardbutton-apply-16.png); }
+            QGroupBox { border: 1px solid #414868; border-radius: 5px; margin-top: 20px; font-weight: bold; color: #7aa2f7; }
+            QGroupBox::title { subcontrol-origin: margin; left: 10px; padding: 0 5px; }
         """)
-
-        # TAB STYLES
-        tab_stylesheet = f"""
-            QTabWidget::pane {{ border: 1px solid {border}; background: {bg_sidebar}; }}
-            QTabBar::tab {{ background: {bg_main}; color: {text_main}; padding: 10px 15px; border: 1px solid {border}; border-bottom: none; border-top-left-radius: 4px; border-top-right-radius: 4px; font-weight: bold; }}
-            QTabBar::tab:selected {{ background: {accent}; color: {btn_text}; }}
-            QTabBar::tab:hover {{ background: {bg_header}; }}
-        """
-        
-        if hasattr(self, 'port_tabs'): self.port_tabs.setStyleSheet(tab_stylesheet)
-        if hasattr(self, 'tabs'): self.tabs.setStyleSheet(tab_stylesheet)
-        
-        # Search Input Style
-        if hasattr(self, 'search_input'): self.search_input.setStyleSheet(search_input_style)
 
     def switch_port(self, index):
         active_code = list(self.port_views.keys())[index] # Tabs added in order KRPUS, KRKAN, KRINC
@@ -1417,20 +1232,20 @@ class BerthMonitor(QMainWindow):
         layout.setContentsMargins(5, 5, 5, 5)
         
         # Helper to create table
-        def create_map_table(title, headers=["Original", "New"]):
+        def create_map_table(title):
             lbl = QLabel(title)
             lbl.setStyleSheet("font-weight: bold; color: #7aa2f7; margin-top: 10px;")
             layout.addWidget(lbl)
             
             table = QTableWidget()
-            table.setColumnCount(len(headers))
-            table.setHorizontalHeaderLabels(headers)
+            table.setColumnCount(2)
+            table.setHorizontalHeaderLabels(["Original", "New"])
             table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
             layout.addWidget(table)
             return table
 
-        self.map_line_table = create_map_table("Line Mapping", ["Original", "New", "Color"])
-        self.map_route_table = create_map_table("Route Mapping", ["Original", "New"])
+        self.map_line_table = create_map_table("Line Mapping")
+        self.map_route_table = create_map_table("Route Mapping")
         
         # Buttons
         btn_layout = QHBoxLayout()
@@ -1455,7 +1270,10 @@ class BerthMonitor(QMainWindow):
         unique_lines = sorted(list(set(d.get('선사', '') for d in self.vessel_data_list)))
         unique_routes = sorted(list(set(d.get('항로', '') for d in self.vessel_data_list)))
         
-        def fill_table(table, items, is_line_table=False):
+        # Preserving existing "New" values if reloading same data? 
+        # For simplicity, we just rebuild. User can Save/Load JSON for persistence.
+        
+        def fill_table(table, items):
             table.setRowCount(len(items))
             for r, item in enumerate(items):
                 # Col 0: Original (Read-onlyish)
@@ -1466,21 +1284,8 @@ class BerthMonitor(QMainWindow):
                 # Col 1: New (Editable, default empty)
                 table.setItem(r, 1, QTableWidgetItem(""))
                 
-                # Col 2: Color (for Lines)
-                if is_line_table and table.columnCount() > 2:
-                    btn_color = QPushButton()
-                    btn_color.setFixedSize(60, 20)
-                    
-                    # Use get_color to ensure we get either the saved color OR a consistent random color
-                    # .name() ensures we get the hex string from the QColor object
-                    initial_color = self.get_color(item).name()
-                        
-                    btn_color.setStyleSheet(f"background-color: {initial_color}; border: 1px solid #555;")
-                    btn_color.clicked.connect(self.pick_color)
-                    table.setCellWidget(r, 2, btn_color)
-            
-        fill_table(self.map_line_table, unique_lines, is_line_table=True)
-        fill_table(self.map_route_table, unique_routes, is_line_table=False)
+        fill_table(self.map_line_table, unique_lines)
+        fill_table(self.map_route_table, unique_routes)
 
     def apply_mappings(self):
         # 1. Read Tables
@@ -1516,70 +1321,29 @@ class BerthMonitor(QMainWindow):
         # Let's re-populate to confirm the change state.
         self.populate_mapping_tables()
         
-    def pick_color(self):
-        btn = self.sender()
-        if not btn: return
-        
-        color = QColorDialog.getColor()
-        if color.isValid():
-            hex_color = color.name()
-            btn.setStyleSheet(f"background-color: {hex_color}; border: 1px solid #555;")
-            
-            # Find which line this is
-            line_name = None
-            for r in range(self.map_line_table.rowCount()):
-                if self.map_line_table.cellWidget(r, 2) == btn:
-                    line_name = self.map_line_table.item(r, 0).text()
-                    break
-            
-            if line_name:
-                self.line_colors[line_name] = QColor(hex_color)
-                self.draw_graphic() # Instant update
-            
     def save_mappings(self):
-        default_name = f"mapping_{datetime.now().strftime('%Y_%m_%d_%H_%M_%S')}.json"
-        filename, _ = QFileDialog.getSaveFileName(self, "Save Mapping", default_name, "JSON Files (*.json)")
-        if filename:
-            self.perform_save_mapping(filename)
-
-    def perform_save_mapping(self, filename):
         data = {
             'lines': {},
-            'routes': {},
-            'line_colors': {}
+            'routes': {}
         }
+        
         for r in range(self.map_line_table.rowCount()):
             orig = self.map_line_table.item(r, 0).text()
             new = self.map_line_table.item(r, 1).text().strip()
             if new: data['lines'][orig] = new
-            
-            btn_color = self.map_line_table.cellWidget(r, 2)
-            if btn_color:
-                 style = btn_color.styleSheet()
-                 if "background-color:" in style:
-                     try:
-                         hex_code = style.split("background-color:")[1].split(";")[0].strip()
-                         data['line_colors'][orig] = hex_code
-                     except: pass
             
         for r in range(self.map_route_table.rowCount()):
             orig = self.map_route_table.item(r, 0).text()
             new = self.map_route_table.item(r, 1).text().strip()
             if new: data['routes'][orig] = new
             
-        try:
-            with open(filename, 'w', encoding='utf-8') as f:
-                json.dump(data, f, indent=4, ensure_ascii=False)
-            save_last_mapping_path(filename)
-        except Exception as e:
-            print(f"Error saving mapping: {e}")
-
-    def auto_save_mappings(self):
-        # Auto-save to a temporary file or a designated auto-save location
-        # For simplicity, let's save to a file named with timestamp in the current directory
-        filename = f"auto_mapping_{datetime.now().strftime('%Y_%m_%d_%H_%M_%S')}.json"
-        self.perform_save_mapping(filename)
-
+        filename, _ = QFileDialog.getSaveFileName(self, "Save Mapping", "", "JSON Files (*.json)")
+        if filename:
+            try:
+                with open(filename, 'w', encoding='utf-8') as f:
+                    json.dump(data, f, indent=4, ensure_ascii=False)
+            except Exception as e:
+                print(f"Error saving: {e}")
 
     def load_mappings(self, file_path=None):
         if file_path:
@@ -1596,38 +1360,14 @@ class BerthMonitor(QMainWindow):
             # Apply to Tables
             loaded_lines = data.get('lines', {})
             loaded_routes = data.get('routes', {})
-            loaded_colors = data.get('line_colors', {}) # New: Load Colors
             
-            # Convert loaded hex strings to QColor objects
-            converted_colors = {}
-            for line, hex_str in loaded_colors.items():
-                converted_colors[line] = QColor(hex_str)
-            
-            self.line_colors = converted_colors # Update internal dict with QColor objects
-            
-            def match_table(table, map_data, color_data=None):
-                if color_data is None:
-                    color_data = {} # Default empty dict if not provided
+            def match_table(table, map_data):
                 for r in range(table.rowCount()):
                     orig = table.item(r, 0).text()
                     if orig in map_data:
                         table.setItem(r, 1, QTableWidgetItem(map_data[orig]))
-                    
-                    # Handle Color Button (Column 2) if this is the Line Table
-                    if table.columnCount() > 2: # Check if the table has a 3rd column
-                        btn_color = QPushButton()
-                        btn_color.setFixedSize(60, 20)
-                        
-                        # Set initial color logic
-                        initial_color = "#ffffff" # Default
-                        if orig in color_data:
-                            initial_color = color_data[orig]
-                        
-                        btn_color.setStyleSheet(f"background-color: {initial_color}; border: 1px solid #555;")
-                        btn_color.clicked.connect(self.pick_color)
-                        table.setCellWidget(r, 2, btn_color)
             
-            match_table(self.map_line_table, loaded_lines, loaded_colors)
+            match_table(self.map_line_table, loaded_lines)
             match_table(self.map_route_table, loaded_routes)
             
             # Save for next time (if manual load or first time)
@@ -1660,179 +1400,12 @@ class BerthMonitor(QMainWindow):
         self.memo_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
         self.memo_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
         self.memo_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        
+        # User requested 2x row height to show 2 lines
+        self.memo_table.verticalHeader().setDefaultSectionSize(50) 
+        
         self.memo_table.cellChanged.connect(self.on_memo_changed)
         layout.addWidget(self.memo_table)
-        
-    def create_search_tab(self):
-        self.tab_search = QWidget()
-        layout = QVBoxLayout(self.tab_search)
-        layout.setContentsMargins(5, 5, 5, 5)
-        
-        # Input Area (Label + TextEdit)
-        lbl_instruction = QLabel("Paste Excel Data (Vessel Name + Voyage):")
-        lbl_instruction.setStyleSheet("font-weight: bold; color: #7aa2f7;")
-        layout.addWidget(lbl_instruction)
-        
-        self.search_input = QTextEdit()
-        self.search_input.setPlaceholderText("Example:\nSUNNY 001\nMOON 002W\n...")
-        self.search_input.setMaximumHeight(100)
-        # Style for input
-        self.search_input.setStyleSheet("background-color: #24283b; color: #a9b1d6; border: 1px solid #414868;")
-        layout.addWidget(self.search_input)
-        
-        # Action Buttons
-        btn_layout = QHBoxLayout()
-        btn_search = QPushButton("🔍 SEARCH")
-        btn_search.setStyleSheet("background-color: #7dcfff; color: black; font-weight: bold;")
-        btn_search.clicked.connect(self.perform_search)
-        
-        btn_clear = QPushButton("❌ CLEAR")
-        btn_clear.setStyleSheet("background-color: #f7768e; color: black; font-weight: bold;")
-        btn_clear.clicked.connect(self.clear_search)
-        
-        btn_layout.addWidget(btn_search)
-        btn_layout.addWidget(btn_clear)
-        layout.addLayout(btn_layout)
-        
-        # Results Table
-        self.search_table = QTableWidget()
-        self.search_table.setColumnCount(5)
-        headers = ["Terminal", "Route", "Vessel", "Berth", "Depart"]
-        self.search_table.setHorizontalHeaderLabels(headers)
-        self.search_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
-        self.search_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.Stretch) # Vessel Name stretches
-        self.search_table.setSelectionBehavior(QTableWidget.SelectRows)
-        self.search_table.setEditTriggers(QTableWidget.NoEditTriggers)
-        self.search_table.cellClicked.connect(self.focus_searched_vessel)
-        
-        layout.addWidget(QLabel("<b>Search Results:</b>"))
-        layout.addWidget(self.search_table)
-
-    def perform_search(self):
-        # 1. Reset Previous
-        self.clear_search(clear_input=False)
-        
-        text = self.search_input.toPlainText().strip()
-        if not text: return
-        
-        # 2. Parse Lines
-        lines = [line.strip() for line in text.split('\n') if line.strip()]
-        
-        found_count = 0
-        
-        # 3. Search Logic
-        # We need to match AGAINST the active port's data
-        # Token-based matching: Input "SUNNY 002" -> Tokens ["SUNNY", "002"]
-        # Match if ALL tokens appear in (VesselName + Voyage) string.
-        
-        matching_vessels = []
-        
-        for search_line in lines:
-            tokens = search_line.lower().split()
-            if not tokens: continue
-            
-            # Search in current vessel list
-            for vessel_item in self.scene.items():
-                if not isinstance(vessel_item, VesselItem): continue
-                
-                data = vessel_item.data
-                # Construct searchable string
-                v_name = data.get('모선명', '').lower()
-                v_voy = str(data.get('모선항차', '')).lower()
-                
-                # Combined string for searching
-                target_str = f"{v_name} {v_voy}"
-                
-                # Check ALL tokens
-                if all(token in target_str for token in tokens):
-                    # MATCH FOUND
-                    matching_vessels.append(vessel_item)
-                    vessel_item.is_searched = True
-                    # Start Rainbow Animation (reuses Highlight logic)
-                    if not vessel_item.is_highlighted:
-                        vessel_item.neon_timer.start(50)
-                    vessel_item.update() # Trigger repaint for Checkmark
-        
-        # 4. Populate Table
-        self.search_table.setRowCount(len(matching_vessels))
-        for i, v_item in enumerate(matching_vessels):
-            d = v_item.data
-            
-            # Terminal
-            self.search_table.setItem(i, 0, QTableWidgetItem(d.get('터미널', '')))
-            # Route
-            self.search_table.setItem(i, 1, QTableWidgetItem(d.get('항로', '')))
-            # Vessel + Carrier Voyage (선사항차)
-            # Request: "VESSEL에는 선명과 선사항차를 보여줘"
-            v_str = f"{d.get('모선명','')} {d.get('선사항차','')}"
-            item_v = QTableWidgetItem(v_str)
-            item_v.setData(Qt.UserRole, v_item) # Store Reference
-            self.search_table.setItem(i, 2, item_v)
-            
-            # Dates
-            self.search_table.setItem(i, 3, QTableWidgetItem(format_short_dt(d['eta'])))
-            self.search_table.setItem(i, 4, QTableWidgetItem(format_short_dt(d['etd'])))
-            
-        if matching_vessels:
-            # Force update scene
-            self.scene.update()
-
-    def clear_search(self, clear_input=True):
-        if clear_input:
-            self.search_input.clear()
-        
-        self.search_table.setRowCount(0)
-        
-        # Clear flags on ALL items in scene
-        for item in self.scene.items():
-            if isinstance(item, VesselItem):
-                if item.is_searched:
-                    item.is_searched = False
-                    # Stop Rainbow Animation (if not otherwise highlighted)
-                    # For simplicity, we stop it. 
-                    # If the user HAD Highlight Mode on separately, this might stop it,
-                    # but usually search is transient.
-                    if not item.is_highlighted: # Only stop if it wasn't manually highlighted
-                         # Actually `is_highlighted` is the toggle flag.
-                         # If we reused neon timer, we should check if we should stop it.
-                         # But wait, `is_highlighted` is set by the toggle button logic?
-                         # Let's just stop it to be safe, or check status.
-                         # The simplest way: toggle_highlight sets `is_highlighted` = True.
-                         # If we manipulate timer directly, `is_highlighted` might mismatch.
-                         # Let's just stop timer.
-                        item.neon_timer.stop()
-                        item.setPen(item.default_pen)
-                        
-                    item.update()
-        
-        self.scene.update()
-
-    def focus_searched_vessel(self, row, col):
-        # Get VesselItem from UserRole in Col 2 (Vessel column)
-        item_v = self.search_table.item(row, 2)
-        if not item_v: return
-        
-        v_item = item_v.data(Qt.UserRole)
-        if v_item:
-            # 1. Reset Focus on all OTHERs (or just clear global tracker if we had one)
-            # Efficient way: Iterate scene or keep list? 
-            # We can iterate scene items, or just iterate `matching_vessels` if we stored them,
-            # but simpler is scene iteration or accept slight perf cost.
-            # actually we can just iterate scene items check type.
-            for item in self.scene.items():
-                if isinstance(item, VesselItem) and item.is_search_focused:
-                    item.is_search_focused = False
-                    item.update()
-            
-            # 2. Set Focus
-            v_item.is_search_focused = True
-            v_item.update()
-            
-            self.gv.centerOn(v_item)
-            
-            self.scene.clearSelection()
-            v_item.setSelected(True)
-
 
     def toggle_memo_mode(self):
         self.is_memo_mode = self.btn_memo.isChecked()
@@ -1844,11 +1417,11 @@ class BerthMonitor(QMainWindow):
             self.tabs.setCurrentWidget(self.tab_memo)
             # ON state: complementary color (cyan) with ON text below
             self.btn_memo.setStyleSheet("background-color: #00ffff; color: black;")
-            self.btn_memo.setText("MEMO\non")
+            self.btn_memo.setText("❤ MEMO\non")
         else:
             # OFF state: original color with OFF text below
             self.btn_memo.setStyleSheet("")
-            self.btn_memo.setText("MEMO\noff")
+            self.btn_memo.setText("❤ MEMO\noff")
 
     def on_memo_changed(self, row, col):
         if col == 1: # Memo Content changed
@@ -1865,24 +1438,6 @@ class BerthMonitor(QMainWindow):
             
             # Redraw graph to show/hide hearts
             self.draw_graphic()
-            
-            # Auto-Save
-            self.auto_save_memos()
-
-    def auto_save_memos(self):
-        # Try to save to last known path, or default
-        path = get_last_memo_path()
-        if not path:
-             # Default to a local file if not set
-             path = "port_i_memos.json"
-             # Optionally set it as default? Yes.
-             save_last_memo_path(path)
-             
-        try:
-             with open(path, 'w', encoding='utf-8') as f:
-                 json.dump(self.memo_data, f, indent=4, ensure_ascii=False)
-        except Exception as e:
-             print(f"Auto-save failed: {e}")
 
     def update_animation(self):
         # 5 seconds period. 50ms interval.
@@ -1942,29 +1497,14 @@ class BerthMonitor(QMainWindow):
         self.memo_table.scrollToItem(self.memo_table.item(found_row, 0))
 
     def save_memos(self):
-        default_name = f"memo_{datetime.now().strftime('%Y_%m_%d_%H_%M_%S')}.json"
-        filename, _ = QFileDialog.getSaveFileName(self, "Save Memos", default_name, "JSON Files (*.json)")
+        filename, _ = QFileDialog.getSaveFileName(self, "Save Memos", "", "JSON Files (*.json)")
         if filename:
-            self.perform_save_memo(filename)
-
-    def perform_save_memo(self, filename):
-        try:
-            with open(filename, 'w', encoding='utf-8') as f:
-                json.dump(self.memo_data, f, indent=4, ensure_ascii=False)
-            save_last_memo_path(filename)
-        except Exception as e:
-            print(f"Error saving memos: {e}")
-
-    def auto_save_memos(self):
-        filename = f"memo_{datetime.now().strftime('%Y_%m_%d_%H_%M_%S')}.json"
-        self.perform_save_memo(filename)
-
-    def shutdown_app(self):
-        # Auto-save everything
-        self.auto_save_mappings()
-        self.auto_save_memos()
-        QApplication.quit()
-
+            try:
+                with open(filename, 'w', encoding='utf-8') as f:
+                    json.dump(self.memo_data, f, indent=4, ensure_ascii=False)
+                save_last_memo_path(filename)
+            except Exception as e:
+                print(f"Error saving memos: {e}")
 
     def load_memos(self, file_path=None):
         if file_path:
@@ -2035,15 +1575,9 @@ class BerthMonitor(QMainWindow):
         self.draw_graphic()
 
     def get_color(self, line):
-        if line not in self.line_colors or not self.line_colors[line].isValid():
-            # Generate Random Pastel Color
-            hue = random.randint(0, 359)
-            saturation = random.randint(90, 160) # Low saturation for pastel
-            value = random.randint(200, 255)     # High value for brightness
-            
-            color = QColor.fromHsv(hue, saturation, value)
-            self.line_colors[line] = color
-            
+        if line not in self.line_colors:
+            idx = len(self.line_colors) % len(self.base_colors)
+            self.line_colors[line] = QColor(self.base_colors[idx])
         return self.line_colors[line]
 
     def toggle_copy_mode(self):
@@ -2053,11 +1587,11 @@ class BerthMonitor(QMainWindow):
             self.connect_btn.setChecked(False)
             # ON state: complementary color (orange) with ON text below
             self.copy_btn.setStyleSheet("background-color: #ff8c00; color: black;")
-            self.copy_btn.setText("Vessel Copy\non")
+            self.copy_btn.setText("📋 Vessel Copy\non")
         else:
             self.current_view_mode = "NORMAL"
             self.copy_btn.setStyleSheet("")
-            self.copy_btn.setText("Vessel Copy\noff")
+            self.copy_btn.setText("📋 Vessel Copy\noff")
 
     def toggle_highlight_mode(self):
         if self.highlight_btn.isChecked():
@@ -2066,11 +1600,11 @@ class BerthMonitor(QMainWindow):
             self.connect_btn.setChecked(False)
             # ON state: complementary color (lime green) with ON text below
             self.highlight_btn.setStyleSheet("background-color: #32cd32; color: black;")
-            self.highlight_btn.setText("Highlight Mode\non")
+            self.highlight_btn.setText("✨ Highlight Mode\non")
         else:
             self.current_view_mode = "NORMAL"
             self.highlight_btn.setStyleSheet("")
-            self.highlight_btn.setText("Highlight Mode\noff")
+            self.highlight_btn.setText("✨ Highlight Mode\noff")
             self.clear_analysis_artifacts()
  
     def toggle_connect_mode(self):
@@ -2080,11 +1614,11 @@ class BerthMonitor(QMainWindow):
             self.highlight_btn.setChecked(False)
             # ON state: complementary color (blue) with ON text below
             self.connect_btn.setStyleSheet("background-color: #1e90ff; color: black;")
-            self.connect_btn.setText("Connect Mode\non")
+            self.connect_btn.setText("🔗 Connect Mode\non")
         else:
             self.current_view_mode = "NORMAL"
             self.connect_btn.setStyleSheet("")
-            self.connect_btn.setText("Connect Mode\noff")
+            self.connect_btn.setText("🔗 Connect Mode\noff")
             self.clear_analysis_artifacts()
 
     def clear_analysis_artifacts(self):
@@ -2440,10 +1974,6 @@ class BerthMonitor(QMainWindow):
 
     def draw_graphic(self):
         self.scene.clear()
-        # Reset tracking variables as items are deleted
-        self.current_time_text = None
-        self.current_time_box = None
-        self.current_time_line = None
         if not self.vessel_data_list: return
         
         min_eta = min(d['eta'] for d in self.vessel_data_list) - timedelta(days=2)
@@ -2571,125 +2101,6 @@ class BerthMonitor(QMainWindow):
             self.scene.addItem(item)
             self.vessel_items.append(item)
 
-        # Current Time Display
-        self.update_current_time_display()
-
-
-    def update_current_time_display(self):
-        """Update current time display and vertical line position"""
-        from datetime import datetime
-        
-        # Remove old components if they exist
-        if self.current_time_text:
-            self.scene.removeItem(self.current_time_text)
-        if self.current_time_box:
-            self.scene.removeItem(self.current_time_box)
-        if self.current_time_line:
-            self.scene.removeItem(self.current_time_line)
-        
-        # Get current time
-        now = datetime.now()
-        
-        # 1. Calculate X Position first
-        line_x = 0
-        if hasattr(self, 'start_time') and self.start_time:
-            time_diff = (now - self.start_time).total_seconds() / 3600  # hours
-            line_x = time_diff * self.pixels_per_hour
-        
-        # 2. Format Time Text
-        time_str = now.strftime("%Y/%b/%d %H:%M:%S").upper()
-        
-        # Create text item
-        self.current_time_text = QGraphicsTextItem(time_str)
-        self.current_time_text.setFont(QFont("Segoe UI", 12, QFont.Bold))
-        self.current_time_text.setDefaultTextColor(QColor("#50fa7b"))  # Bright green
-        self.current_time_text.setZValue(1000)
-        
-        # 3. Position Text relative to Line
-        text_rect = self.current_time_text.boundingRect()
-        # Center text horizontally on the line
-        text_x = line_x - (text_rect.width() / 2)
-        text_y = -120  # Above the date headers
-        self.current_time_text.setPos(text_x, text_y)
-        
-        # 4. Create Box around Text
-        padding = 8
-        self.current_time_box = QGraphicsRectItem(
-            text_x - padding,
-            text_y - padding,
-            text_rect.width() + padding * 2,
-            text_rect.height() + padding * 2
-        )
-        self.current_time_box.setPen(QPen(QColor("#50fa7b"), 2))
-        self.current_time_box.setBrush(QBrush(QColor(30, 30, 30, 200)))
-        self.current_time_box.setZValue(999)
-        
-        # 5. Draw Vertical Line
-        if hasattr(self, 'terminal_list') and self.terminal_list:
-            # Line starts right below the box
-            line_start_y = text_y + text_rect.height() + padding
-            line_end_y = len(self.terminal_list) * self.row_height + 20
-            
-            self.current_time_line = QGraphicsLineItem(line_x, line_start_y, line_x, line_end_y)
-            self.current_time_line.setPen(QPen(QColor("#50fa7b"), 2))
-            self.current_time_line.setZValue(500)
-            self.scene.addItem(self.current_time_line)
-        
-        # Add to scene
-        self.scene.addItem(self.current_time_box)
-        self.scene.addItem(self.current_time_text)
-
-    def get_original_data(self, current_data):
-        key_name = current_data['모선명']
-        key_voy = current_data['선사항차']
-        
-        # Search in original_vessel_data
-        for orig in self.original_vessel_data:
-            if orig['모선명'] == key_name and orig['선사항차'] == key_voy:
-                return orig
-        return None
-
-    def update_log_entry(self, log_list, entry_key, new_entry):
-        # Entry Key: Unique Key (e.g. "VesselName|Voyage")
-        
-        # Add key to new_entry if provided (helper)
-        if new_entry:
-             new_entry['log_key'] = entry_key
-        
-        # Extract vessel name and voyage from the key for backward compatibility
-        # entry_key format: "Name|Voyage"
-        if '|' in entry_key:
-            vessel_name, vessel_voyage = entry_key.split('|', 1)
-            # Construct the display text that would appear in legacy entries
-            # Format: "Name (DisplayVoyage)"
-            vessel_display = f"{vessel_name} ({get_display_voyage(vessel_voyage)})"
-        else:
-            vessel_display = entry_key
-        
-        # Strategy: Find ALL indices with this key (to handle legacy dupes)
-        indices = []
-        for i, log in enumerate(log_list):
-            # Match using multiple criteria:
-            # 1. New style: log_key field
-            # 2. Old style master: vessel_text field
-            # 3. Old style slave: name field
-            if (log.get('log_key') == entry_key or 
-                log.get('vessel_text') == vessel_display or 
-                log.get('name') == vessel_display):
-                indices.append(i)
-        
-        # Determine insertion point (first found index or end)
-        insert_idx = indices[0] if indices else len(log_list)
-        
-        # Remove ALL existing entries for this key (reverse order to keep indices valid)
-        for i in sorted(indices, reverse=True):
-            log_list.pop(i)
-            
-        # Re-Insert if new_entry exists
-        if new_entry:
-            # Check range
-            if insert_idx > len(log_list): insert_idx = len(log_list)
-            log_list.insert(insert_idx, new_entry)
 
     def handle_vessel_move(self, master_item):
         new_y = master_item.pos().y()
@@ -2733,86 +2144,61 @@ class BerthMonitor(QMainWindow):
         
         master_item.update_time_labels()
 
-        # Update Change Sidebar TABLE (MASTER)
-        # 1. Get Original Data
-        orig_data = self.get_original_data(master_item.data)
-        
-        if orig_data:
-            # 2. Compare Current vs Original
-            orig_term = orig_data['full_berth']
-            orig_eta = orig_data['eta']
+        # Update Change Sidebar TABLE
+        if old_term == new_term and old_eta == new_eta:
+            pass
+        else:
+             # Construct Log Entry
+            vessel_display = master_item.data['모선명'] + " (" + get_display_voyage(master_item.data['선사항차']) + ")"
+            vessel_widget_text = None
+            vessel_widget_style = None
             
-            curr_term = master_item.data['full_berth']
-            curr_eta = master_item.data['eta']
+            if hasattr(master_item, 'copy_label'):
+                if master_item.copy_label == "1st":
+                     vessel_widget_text = vessel_display + " 1ST"
+                     vessel_widget_style = "border: 2px solid #ff0000; color: #ffffff; font-weight: bold; background: #ff0000; border-radius: 4px;"
+                elif master_item.copy_label == "2nd":
+                     vessel_widget_text = vessel_display + " 2ND"
+                     vessel_widget_style = "border: 2px solid #0088ff; color: #ffffff; font-weight: bold; background: #0088ff; border-radius: 4px;"
             
-            # Check for ANY change
-            if orig_term != curr_term or orig_eta != curr_eta:
-                # Construct Log Entry
-                # Use strict key for identification
-                log_key = f"{master_item.data['모선명']}|{master_item.data['선사항차']}"
-                vessel_display = master_item.data['모선명'] + " (" + get_display_voyage(master_item.data['선사항차']) + ")"
+            old_str = f"{old_term.replace('-', '(') + ')'} {format_short_dt(old_eta)}"
+            new_str = f"{new_term.replace('-', '(') + ')'} {format_short_dt(new_eta)}"
+            to_widget_text = None
+            to_widget_style = None
+            
+            old_t_name = old_term.split('-')[0]
+            new_t_name = new_term.split('-')[0]
+            
+            color_code = None
+            if old_t_name != new_t_name:
+                color_code = "#ff5555"
+            elif old_term != new_term:
+                color_code = "#50fa7b"
                 
-                vessel_widget_text = None
-                vessel_widget_style = None
+            if color_code:
+                to_widget_text = new_str
+                to_widget_style = f"border: 2px solid {color_code}; color: {color_code}; font-weight: bold; background: #282a36;"
+            
+            delta = new_eta - old_eta
+            delta_str = format_time_delta(delta)
+            shift_color = None
+            if delta.total_seconds() != 0:
+                shift_color = "#ffb86c"
                 
-                if hasattr(master_item, 'copy_label'):
-                    if master_item.copy_label == "1st":
-                         vessel_widget_text = vessel_display + " 1ST"
-                         vessel_widget_style = "border: 2px solid #ff0000; color: #ffffff; font-weight: bold; background: #ff0000; border-radius: 4px;"
-                    elif master_item.copy_label == "2nd":
-                         vessel_widget_text = vessel_display + " 2ND"
-                         vessel_widget_style = "border: 2px solid #0088ff; color: #ffffff; font-weight: bold; background: #0088ff; border-radius: 4px;"
-                
-                orig_str = f"{orig_term.replace('-', '(') + ')'} {format_short_dt(orig_eta)}"
-                curr_str = f"{curr_term.replace('-', '(') + ')'} {format_short_dt(curr_eta)}"
-                
-                to_widget_text = None
-                to_widget_style = None
-                
-                old_t_name = orig_term.split('-')[0]
-                new_t_name = curr_term.split('-')[0]
-                
-                color_code = None
-                if old_t_name != new_t_name:
-                    color_code = "#ff5555" # Red (Process Change)
-                elif orig_term != curr_term:
-                    color_code = "#50fa7b" # Green (Berth Change)
-                
-                # Check Time Change
-                delta = curr_eta - orig_eta
-                delta_str = format_time_delta(delta)
-                shift_color = None
-                
-                if delta.total_seconds() != 0:
-                    shift_color = "#ffb86c" # Orange (Time Change)
-                
-                # Highlight logic for TO column if terminal changed
-                if color_code:
-                    to_widget_text = curr_str
-                    to_widget_style = f"border: 2px solid {color_code}; color: {color_code}; font-weight: bold; background: #282a36;"
-                
-                entry = {
-                    'vessel_text': vessel_display,
-                    'vessel_widget_text': vessel_widget_text,
-                    'vessel_widget_style': vessel_widget_style,
-                    'from': orig_str,
-                    'to_text': curr_str,
-                    'to_widget_text': to_widget_text,
-                    'to_widget_style': to_widget_style,
-                    'shift_text': delta_str,
-                    'shift_color': shift_color
-                }
-                
-                
-                # Update Log List (Unique by Key)
-                self.update_log_entry(self.ports[self.active_port_code].master_log_data, log_key, entry)
-            else:
-                # No difference from Original -> Remove if exists
-                log_key = f"{master_item.data['모선명']}|{master_item.data['선사항차']}"
-                self.update_log_entry(self.ports[self.active_port_code].master_log_data, log_key, None)
-                
-            # Repopulate Table
-            self.repopulate_logs()
+            entry = {
+                'vessel_text': vessel_display,
+                'vessel_widget_text': vessel_widget_text,
+                'vessel_widget_style': vessel_widget_style,
+                'from': old_str,
+                'to_text': new_str,
+                'to_widget_text': to_widget_text,
+                'to_widget_style': to_widget_style,
+                'shift_text': delta_str,
+                'shift_color': shift_color
+            }
+            
+            self.ports[self.active_port_code].master_log_data.append(entry)
+            self.add_master_log_row(entry)
         
         # Check if this is the first move after copy
         if hasattr(master_item, 'is_just_copied') and master_item.is_just_copied:
@@ -2857,41 +2243,211 @@ class BerthMonitor(QMainWindow):
                     
                     changed = True
 
-        # Generate Logs based on Total Shift (Original vs Current) - SLAVE
-        # Compare against ORIGINAL data for cumulative log
-        
-        current_slave_logs = self.ports[self.active_port_code].slave_log_data
-        
-        for v in terminal_vessels:
-            if v == master_item: continue # Skip Master (logged separately)
+        # Generate Logs based on Total Shift
+        pending_logs = []
+        for v, old_eta in initial_state.items():
+            new_eta = v.data['eta']
+            total_delta = new_eta - old_eta
             
-            orig = self.get_original_data(v.data)
-            if not orig: continue
-            
-            total_delta = v.data['eta'] - orig['eta']
-            
-            log_key = f"{v.data['모선명']}|{v.data['선사항차']}"
-            v_name = v.data['모선명'] + " (" + get_display_voyage(v.data['선사항차']) + ")"
-            
-            # If changed significantly (> 1 hr)
-            entry = None
+            # Only log if shift is at least 1 hour (3600 seconds)
             if abs(total_delta.total_seconds()) >= 3600:
-                entry = {
+                pending_logs.append({
                      'vessel': v,
-                     'name': v_name,
-                     'old_eta': format_short_dt(orig['eta']),
-                     'new_eta': format_short_dt(v.data['eta']),
+                     'name': v.data['모선명'] + " (" + get_display_voyage(v.data['선사항차']) + ")",
+                     'old_eta_str': format_short_dt(old_eta),
+                     'new_eta_str': format_short_dt(new_eta),
                      'delta': total_delta,
                      'delta_str': format_time_delta(total_delta)
-                }
-            
-            
-            # Update Log (Unique by log_key)
-            self.update_log_entry(current_slave_logs, log_key, entry)
+                 })
 
-        # Repopulate Logs (Both Master and Slave might have updated)
-        # Repopulate Logs (Both Master and Slave might have updated)
-        self.repopulate_logs()
+        # Sort logs by Shift (Descending)
+        pending_logs.sort(key=lambda x: abs(x['delta'].total_seconds()), reverse=True)
+        
+        # Add to Table
+        for log in pending_logs:
+            entry = {
+                'name': log['name'],
+                'old_eta': log['old_eta_str'],
+                'new_eta': log['new_eta_str'],
+                'delta_str': format_time_delta(log['delta']) # Assuming stored as timedelta in pending_logs
+            }
+            # Note: pending_logs stored delta, but entry wants delta_str for simple storage
+            # My add_slave_log_row uses 'delta_str'.
+            
+            self.ports[self.active_port_code].slave_log_data.append(entry)
+            self.add_slave_log_row(entry)
+            
+        self.slave_table.scrollToBottom()
+
+
+    def handle_vessel_move(self, master_item):
+        new_y = master_item.pos().y()
+        term_idx = max(0, min(round(new_y / self.row_height), len(self.terminal_list) - 1))
+        snapped_y = term_idx * self.row_height + 10
+        
+        new_x = master_item.pos().x()
+        hours_from_start = round(new_x / self.pixels_per_hour)
+        snapped_x = hours_from_start * self.pixels_per_hour
+        
+        master_item.setPos(snapped_x, snapped_y)
+        
+        # Snap Width as well
+        current_width = master_item.rect().width()
+        duration_hours = max(1, round(current_width / self.pixels_per_hour))
+        snapped_width = duration_hours * self.pixels_per_hour
+        master_item.setRect(0, 0, snapped_width, master_item.rect().height())
+        master_item.update_time_labels()
+        
+        old_eta = master_item.data['eta']
+        old_term = master_item.data['full_berth']
+        
+        new_eta = self.start_time + timedelta(hours=hours_from_start)
+        new_term = self.terminal_list[term_idx]
+        
+        new_duration = timedelta(hours=duration_hours)
+        new_etd = new_eta + new_duration
+        
+        master_item.data['eta'] = new_eta
+        master_item.data['etd'] = new_etd
+        master_item.data['full_berth'] = new_term
+        parts = new_term.split('-', 1)
+        master_item.data['터미널'] = parts[0]
+        master_item.data['선석'] = parts[1] if len(parts) > 1 else ""
+        
+        master_item.data['접안예정일시'] = format_date(new_eta)
+        master_item.data['출항예정일시'] = format_date(new_etd)
+        
+        master_item.update_time_labels()
+
+        if old_term == new_term and old_eta == new_eta:
+            pass
+        else:
+            vessel_display = master_item.data['모선명'] + " (" + get_display_voyage(master_item.data['선사항차']) + ")"
+            vessel_widget_text = None
+            vessel_widget_style = None
+            
+            if hasattr(master_item, 'copy_label'):
+                if master_item.copy_label == "1st":
+                     vessel_widget_text = vessel_display + " 1ST"
+                     vessel_widget_style = "border: 2px solid #ff0000; color: #ffffff; font-weight: bold; background: #ff0000; border-radius: 4px;"
+                elif master_item.copy_label == "2nd":
+                     vessel_widget_text = vessel_display + " 2ND"
+                     vessel_widget_style = "border: 2px solid #0088ff; color: #ffffff; font-weight: bold; background: #0088ff; border-radius: 4px;"
+            
+            old_str = f"{old_term.replace('-', '(') + ')'} {format_short_dt(old_eta)}"
+            new_str = f"{new_term.replace('-', '(') + ')'} {format_short_dt(new_eta)}"
+            to_widget_text = None
+            to_widget_style = None
+            
+            old_t_name = old_term.split('-')[0]
+            new_t_name = new_term.split('-')[0]
+            
+            color_code = None
+            if old_t_name != new_t_name:
+                color_code = "#ff5555"
+            elif old_term != new_term:
+                color_code = "#50fa7b"
+                
+            if color_code:
+                to_widget_text = new_str
+                to_widget_style = f"border: 2px solid {color_code}; color: {color_code}; font-weight: bold; background: #282a36;"
+            
+            delta = new_eta - old_eta
+            delta_str = format_time_delta(delta)
+            shift_color = None
+            if delta.total_seconds() != 0:
+                shift_color = "#ffb86c"
+                
+            entry = {
+                'vessel_text': vessel_display,
+                'vessel_widget_text': vessel_widget_text,
+                'vessel_widget_style': vessel_widget_style,
+                'from': old_str,
+                'to_text': new_str,
+                'to_widget_text': to_widget_text,
+                'to_widget_style': to_widget_style,
+                'shift_text': delta_str,
+                'shift_color': shift_color
+            }
+            
+            self.ports[self.active_port_code].master_log_data.append(entry)
+            self.add_master_log_row(entry)
+        
+        if hasattr(master_item, 'is_just_copied') and master_item.is_just_copied:
+             if hasattr(master_item, 'has_moved_during_drag') and master_item.has_moved_during_drag:
+                 master_item.is_just_copied = False
+             else:
+                 pass
+        else:
+             self.resolve_collisions(master_item)
+             
+        self.update_table()
+
+    def resolve_collisions(self, master_item):
+        master_eta = master_item.data['eta']
+        master_etd = master_item.data['etd']
+        master_berth = master_item.data['full_berth']
+        
+        overlapping = []
+        for item in self.vessel_items:
+            if item is master_item: continue
+            if item.data['full_berth'] != master_berth: continue
+            
+            item_eta = item.data['eta']
+            item_etd = item.data['etd']
+            
+            if not (item_etd <= master_eta or item_eta >= master_etd):
+                overlapping.append(item)
+        
+        if not overlapping: return
+        
+        overlapping.sort(key=lambda x: x.data['eta'])
+        
+        pending_logs = []
+        
+        for v in overlapping:
+            old_eta = v.data['eta']
+            
+            new_eta = master_etd + timedelta(hours=self.safety_gap_h)
+            duration = v.data['etd'] - v.data['eta']
+            new_etd = new_eta + duration
+            
+            v.data['eta'] = new_eta
+            v.data['etd'] = new_etd
+            v.data['접안예정일시'] = format_date(new_eta)
+            v.data['출항예정일시'] = format_date(new_etd)
+            
+            hours_from_start = (new_eta - self.start_time).total_seconds() / 3600
+            new_x = hours_from_start * self.pixels_per_hour
+            v.setPos(new_x, v.pos().y())
+            v.update_time_labels()
+            
+            master_etd = new_etd
+            
+            total_delta = new_eta - old_eta
+            if abs(total_delta.total_seconds()) >= 3600:
+                pending_logs.append({
+                     'vessel': v,
+                     'name': v.data['모선명'] + " (" + get_display_voyage(v.data['선사항차']) + ")",
+                     'old_eta_str': format_short_dt(old_eta),
+                     'new_eta_str': format_short_dt(new_eta),
+                     'delta': total_delta,
+                     'delta_str': format_time_delta(total_delta)
+                 })
+
+        pending_logs.sort(key=lambda x: abs(x['delta'].total_seconds()), reverse=True)
+        
+        for log in pending_logs:
+            entry = {
+                'name': log['name'],
+                'old_eta': log['old_eta_str'],
+                'new_eta': log['new_eta_str'],
+                'delta_str': format_time_delta(log['delta'])
+            }
+            
+            self.ports[self.active_port_code].slave_log_data.append(entry)
+            self.add_slave_log_row(entry)
+            
         self.slave_table.scrollToBottom()
 
 if __name__ == "__main__":
