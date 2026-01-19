@@ -8,11 +8,13 @@ from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QHeaderView, QLabel, QSplitter, QGraphicsView, QGraphicsScene,
                              QGraphicsRectItem, QGraphicsTextItem, QGraphicsItem, QGraphicsLineItem,
                              QDialog, QTabWidget, QCheckBox, QGroupBox, QScrollArea, QFrame,
-                             QFileDialog, QHeaderView, QTextEdit, QColorDialog)
-from PyQt5.QtGui import QColor, QFont, QBrush, QPen, QPainter, QWheelEvent, QPolygonF, QPainterPath
+                             QFileDialog, QHeaderView, QTextEdit, QColorDialog, QRadioButton,
+                             QAbstractItemView)
+from PyQt5.QtGui import QColor, QFont, QBrush, QPen, QPainter, QWheelEvent, QPolygonF, QPainterPath, qGray
 from PyQt5.QtCore import Qt, QRectF, pyqtSignal, QObject, QTimer, QLineF, QPointF
 import math
 import random
+import re
 
 
 # pyinstaller -w -F port_i.py
@@ -102,6 +104,31 @@ def get_last_memo_path():
     except:
         return None
 
+def save_terminal_order(order_list):
+    try:
+        data = {}
+        if os.path.exists(CONFIG_FILE):
+             with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
+                 data = json.load(f)
+        data['terminal_order'] = order_list
+        with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
+            json.dump(data, f)
+    except Exception as e:
+        print(f"Error saving terminal order: {e}")
+
+def get_terminal_order():
+    if not os.path.exists(CONFIG_FILE): return []
+    try:
+        with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+            return data.get('terminal_order', [])
+    except:
+        return []
+
+def alphanumeric_key(s):
+    """Helper for natural alphanumeric sorting (A1, A2, A10 instead of A1, A10, A2)"""
+    return [int(text) if text.isdigit() else text.lower() for text in re.split('([0-9]+)', s)]
+
 class ZoomableGraphicsView(QGraphicsView):
     def __init__(self, scene, parent=None):
         super().__init__(scene, parent)
@@ -176,10 +203,11 @@ class ZoomableGraphicsView(QGraphicsView):
             painter.setPen(QColor("#c0caf5")) # Reset text color
 
 class TickerLabel(QWidget):
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, speed=1):
         super().__init__(parent)
         self.segments = [] # List of (text, color)
         self.offset = 0
+        self.speed = speed
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.update_offset)
         self.timer.start(30) # ~33 FPS
@@ -209,11 +237,9 @@ class TickerLabel(QWidget):
             
     def update_offset(self):
         if not self.segments or self.total_text_width == 0: return
-        self.offset += 1
+        self.offset += self.speed
         
         # Loop logic: Reset when the first set has scrolled past
-        # We draw the sequence twice to make it seamless.
-        # But we only need to reset when we've moved by total_text_width + spacer
         fm = self.fontMetrics()
         spacer_width = fm.horizontalAdvance("    ★    ")
         cycle_width = self.total_text_width + spacer_width
@@ -234,8 +260,6 @@ class TickerLabel(QWidget):
         spacer_width = fm.horizontalAdvance(spacer)
         y = (self.height() + fm.ascent() - fm.descent()) / 2
         
-        # Loop logic: Draw the content twice to ensure no gaps
-        # Position: Starts from width and moves left
         start_x = self.width() - self.offset
         
         def draw_sequence(current_x):
@@ -244,19 +268,125 @@ class TickerLabel(QWidget):
                 painter.drawText(int(current_x), int(y), text)
                 current_x += fm.horizontalAdvance(text)
                 
-                # Draw spacer
-                if i < len(self.segments) - 1 or True: # Always draw spacer for looping
-                    painter.setPen(QColor("#a9b1d6")) # Greyish spacer
-                    painter.drawText(int(current_x), int(y), spacer)
-                    current_x += spacer_width
+                # Always draw spacer for looping
+                painter.setPen(QColor("#a9b1d6"))
+                painter.drawText(int(current_x), int(y), spacer)
+                current_x += spacer_width
             return current_x
 
-        # Draw first sequence
         next_x = draw_sequence(start_x)
-        
-        # Draw second sequence immediately after the first to fill the gap during loop
         if next_x < self.width() + self.total_text_width:
             draw_sequence(next_x)
+
+class MemoTickerLabel(TickerLabel):
+    def __init__(self, parent=None, speed=0.5):
+        super().__init__(parent, speed)
+        self.state = "SCROLLING" # SCROLLING, PAUSED, ROTATING
+        self.pause_timer = 0
+        self.rotation_angle = 0
+        self.rainbow_hue = 0
+        self.current_memo_index = -1
+        self.last_triggered_memo = None
+        self.scroll_duration = 0
+        self.gap_timer = 0
+        
+    def update_offset(self):
+        if not self.segments or self.total_text_width == 0: return
+        
+        if self.state == "PAUSED":
+            self.pause_timer -= 30
+            self.rainbow_hue = (self.rainbow_hue + 10) % 360
+            if self.pause_timer <= 0:
+                self.state = "ROTATING"
+            self.update()
+        elif self.state == "ROTATING":
+            self.rotation_angle += 15
+            if self.rotation_angle >= 360:
+                self.rotation_angle = 0
+                self.state = "SCROLLING"
+            self.update()
+        elif self.state == "GAP":
+            self.gap_timer -= 30
+            if self.gap_timer <= 0:
+                self.offset = 0
+                self.state = "SCROLLING"
+            self.update()
+        else: # SCROLLING
+            self.offset += self.speed
+            self.scroll_duration += 30 # timer interval
+            
+            if self.scroll_duration >= 10000:
+                # Trigger every 10 seconds
+                self.state = "PAUSED"
+                self.pause_timer = 2000
+                self.scroll_duration = 0
+                # last_triggered_memo is no longer used for individual segment filters
+            
+            fm = self.fontMetrics()
+            spacer_width = fm.horizontalAdvance("    ★    ")
+            
+            # The sequence is fully gone off-screen (left) when offset exceeds width + total_text_width
+            if self.offset >= (self.width() + self.total_text_width):
+                self.state = "GAP"
+                self.gap_timer = 3000 # 3 seconds
+                self.scroll_duration = 0 # Reset interval count at gap
+            
+            self.update()
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        painter.fillRect(self.rect(), QColor(0, 0, 0))
+        
+        if not self.segments or self.state == "GAP": return
+        
+        painter.setFont(QFont("Segoe UI", 11, QFont.Bold))
+        fm = painter.fontMetrics()
+        spacer = "    ★    "
+        spacer_width = fm.horizontalAdvance(spacer)
+        y = (self.height() + fm.ascent() - fm.descent()) / 2
+        
+        # Determine Transformation
+        apply_effects = self.state in ["PAUSED", "ROTATING"]
+        sparkle_color = QColor.fromHsv(self.rainbow_hue, 255, 255) if self.state == "PAUSED" else None
+        
+        start_x = self.width() - self.offset
+        
+        def draw_sequence(current_x):
+            for i, (text, color) in enumerate(self.segments):
+                painter.save()
+                
+                if apply_effects:
+                    if self.state == "PAUSED":
+                        painter.setPen(sparkle_color)
+                        y_off = math.sin(self.rainbow_hue * 0.1) * 2
+                        painter.drawText(int(current_x), int(y + y_off), text)
+                    elif self.state == "ROTATING":
+                        painter.setPen(color)
+                        # Rotate around the center of the VISIBLE WIDGET for "entire text" effect
+                        # though individual rotation around their own centers might be what user meant,
+                        # let's try widget center per user's "Display 문자 전체"
+                        center_x = self.width() / 2
+                        center_y = self.height() / 2
+                        painter.translate(center_x, center_y)
+                        painter.rotate(self.rotation_angle)
+                        painter.translate(-center_x, -center_y)
+                        painter.drawText(int(current_x), int(y), text)
+                else:
+                    painter.setPen(color)
+                    painter.drawText(int(current_x), int(y), text)
+                
+                painter.restore()
+                current_x += fm.horizontalAdvance(text)
+                
+                painter.setPen(QColor("#a9b1d6"))
+                painter.drawText(int(current_x), int(y), spacer)
+                current_x += spacer_width
+            return current_x
+
+        draw_sequence(start_x)
+        # Note: Seamless drawing removed because we have a distinct GAP state now.
+        # But for long sequences we might still want it? No, user wants a 3s empty gap.
 
 # --- Graphic Items ---
 class ArrowItem(QGraphicsLineItem):
@@ -382,14 +512,26 @@ class VesselItem(QGraphicsRectItem):
         # IN PORT Highlight
         self.is_in_port = False
         
+        # Calculate Complementary Color for text contrast
+        comp_color = QColor(255 - color.red(), 255 - color.green(), 255 - color.blue())
+        
         # Main Text Label: 
-        # Line 1: Vessel Name, Voyage
+        # Line 1: Vessel Name (BOLD), Voyage
         # Line 2: (Shipping Line)
         voyage = get_display_voyage(data['선사항차'])
-        label_text = f"{data['모선명']} - {voyage}\n{data.get('선사', '')}, {data.get('항로', '')}"
-        self.text = QGraphicsTextItem(label_text, self)
-        self.text.setDefaultTextColor(Qt.black)
-        self.text.setFont(QFont("Segoe UI", 7, QFont.Bold))
+        # Use HTML to styling: Bold for vessel name only
+        # We wrap in a div and use text-align: center for better alignment
+        html_text = (
+            f"<div style='color: {comp_color.name()}; font-family: Segoe UI; text-align: center;'>"
+            f"<span style='font-size: 8pt;'><b>{data['모선명']}</b> - {voyage}</span><br/>"
+            f"<span style='font-size: 7pt;'>{data.get('선사', '')}, {data.get('항로', '')}</span>"
+            f"</div>"
+        )
+        
+        self.text = QGraphicsTextItem(self)
+        self.text.setHtml(html_text)
+        self.text.setTextWidth(width) # Ensure text-align center works across total width
+        
         t_rect = self.text.boundingRect()
         self.text.setPos((width - t_rect.width()) / 2, (height - t_rect.height()) / 2)
 
@@ -407,18 +549,49 @@ class VesselItem(QGraphicsRectItem):
         self.etd_text.setPos(width - etd_w - 2, height - 15)
     
     def paint(self, painter, option, widget=None):
+        # --- GRAY MODE CHECK ---
+        # If Gray Mode is ON and vessel has already departed, use grayscale
+        is_departed = False
+        if hasattr(self, 'scene') and self.scene():
+            # Get current time from monitor if possible
+            main_window = self.scene().views()[0].window() # Likely BerthMonitor
+            if hasattr(main_window, 'gray_mode_enabled') and main_window.gray_mode_enabled:
+                now = datetime.now()
+                if self.data.get('etd') and self.data['etd'] < now:
+                    is_departed = True
+
+        painter.save()
+        if is_departed:
+            # Create a grayscale version of the original brush color
+            orig_color = self.brush().color()
+            gray_val = qGray(orig_color.red(), orig_color.green(), orig_color.blue())
+            gray_color = QColor(gray_val, gray_val, gray_val, 150) # Semi-transparent gray
+            painter.setBrush(QBrush(gray_color))
+            painter.setPen(QPen(QColor(100, 100, 100), 1)) # Dim border
+        else:
+            painter.setPen(option.palette.windowText().color()) # Reset pen to default
+            painter.setBrush(self.brush())
+
         # Draw custom border if copy mode
         if self.copy_border_color:
             painter.setPen(QPen(self.copy_border_color, 3))
-            painter.setBrush(self.brush())
             painter.drawRect(self.rect())
-        elif self.is_in_port:
+        elif hasattr(self, 'is_duplicate') and self.is_duplicate:
+            # Lavender, thick border for duplicates
+            painter.setPen(QPen(QColor("#bfabff"), 5))
+            painter.drawRect(self.rect())
+        elif self.is_in_port and not is_departed:
             # Current time line is inside this vessel - Draw Thin Red Outline
             painter.setPen(QPen(Qt.red, 3))
-            painter.setBrush(self.brush())
             painter.drawRect(self.rect())
         else:
-            super().paint(painter, option, widget)
+            # Normal drawing, but we already set the brush if is_departed
+            if is_departed:
+                painter.drawRect(self.rect())
+            else:
+                super().paint(painter, option, widget)
+        
+        painter.restore()
         
         # Draw copy label if set (yellow text on purple background)
         if self.copy_label:
@@ -815,6 +988,7 @@ class PortData:
         self.original_vessel_data = [] 
         self.terminal_list = []
         self.ts_connections = {} 
+        self.auto_connections = [] # List of (idx1, idx2) for duplicates
         
         # Log Data (to repopulate tables)
         # Master Log: List of tuples/dicts matching table columns
@@ -854,8 +1028,8 @@ class BerthMonitor(QMainWindow):
         
         self.line_colors = {}
         self.base_colors = [
-            "#ffadad", "#ffd6a5", "#fdffb6", "#caffbf", 
-            "#9bf6ff", "#a0c4ff", "#bdb2ff", "#ffc6ff"
+            "#ffb3ba", "#ffdfba", "#ffffba", "#baffc9", 
+            "#bae1ff", "#e1baff", "#ffc4e1", "#c4fff9"
         ]
         
         # Filtering
@@ -910,6 +1084,8 @@ class BerthMonitor(QMainWindow):
         self.ticker_timer.start(1000)
         
         self.is_dark_mode = True # Default to Dark Mode
+        self.gray_mode_enabled = False # Default: Gray mode OFF
+        self.terminal_order = get_terminal_order() # Load saved terminal order
         
         self.initUI()
         self.apply_styles()
@@ -1006,7 +1182,7 @@ class BerthMonitor(QMainWindow):
         self.port_tabs.setObjectName("portTabs")
         self.port_tabs.setStyleSheet("""
             QTabWidget::pane { border: 1px solid #414868; background: #1f2335; }
-            QTabBar::tab { background: #1a1b26; color: #a9b1d6; padding: 10px 15px; border: 1px solid #414868; border-bottom: none; border-top-left-radius: 4px; border-top-right-radius: 4px; font-weight: bold; }
+            QTabBar::tab { background: #1a1b26; color: #a9b1d6; padding: 10px 15px; border: 1px solid #414868; border-bottom: none; border-top-left-radius: 4px; border-top-right-radius: 4px; font-weight: bold; min-width: 100px; }
             QTabBar::tab:selected { background: #7aa2f7; color: #1a1b26; }
         """)
         
@@ -1026,10 +1202,20 @@ class BerthMonitor(QMainWindow):
         pc_layout.setContentsMargins(0, 0, 5, 5) # Right/Bottom margin for alignment
         pc_layout.setSpacing(10)
         
-        # News Ticker
-        self.ticker = TickerLabel()
-        self.ticker.setMinimumWidth(900)
-        pc_layout.addWidget(self.ticker)
+        # News Ticker (Split into Stats and Memo)
+        self.ticker_layout = QHBoxLayout()
+        self.ticker_layout.setContentsMargins(0, 0, 0, 0)
+        self.ticker_layout.setSpacing(5)
+        
+        self.stats_ticker = TickerLabel(speed=1.5) # Faster
+        self.stats_ticker.setMinimumWidth(500)
+        self.ticker_layout.addWidget(self.stats_ticker, 3) 
+        
+        self.memo_ticker = MemoTickerLabel(speed=0.6) # Slower
+        self.memo_ticker.setMinimumWidth(500)
+        self.ticker_layout.addWidget(self.memo_ticker, 1) 
+        
+        pc_layout.addLayout(self.ticker_layout)
         
         self.btn_minimize_port = QPushButton("―")
         self.btn_minimize_port.setFixedSize(30, 30)
@@ -1155,6 +1341,10 @@ class BerthMonitor(QMainWindow):
         # --- TAB 5: SEARCH ---
         self.create_search_tab()
         self.tabs.addTab(self.tab_search, "SEARCH")
+        
+        # --- TAB 6: SETTINGS (Gear Icon) ---
+        self.create_settings_tab()
+        self.tabs.addTab(self.tab_settings, "⚙️")
         
         # --- Theme Toggle Button (Corner Widget) ---
         self.theme_container = QWidget()
@@ -1810,6 +2000,140 @@ class BerthMonitor(QMainWindow):
         layout.addWidget(QLabel("<b>Search Results:</b>"))
         layout.addWidget(self.search_table)
 
+    def create_settings_tab(self):
+        self.tab_settings = QWidget()
+        layout = QVBoxLayout(self.tab_settings)
+        layout.setContentsMargins(15, 15, 15, 15)
+        layout.setSpacing(20)
+        
+        title = QLabel("Application Settings")
+        title.setStyleSheet("font-size: 18px; font-weight: bold; color: #7aa2f7;")
+        layout.addWidget(title)
+        
+        # --- Gray Mode Setting ---
+        gray_group = QGroupBox("Visualization")
+        gray_layout = QVBoxLayout(gray_group)
+        
+        gray_label = QLabel("Gray Mode (Auto-dim departed vessels):")
+        gray_layout.addWidget(gray_label)
+        
+        toggle_layout = QHBoxLayout()
+        self.rb_gray_off = QRadioButton("OFF")
+        self.rb_gray_on = QRadioButton("ON")
+        
+        self.rb_gray_off.setChecked(not self.gray_mode_enabled)
+        self.rb_gray_on.setChecked(self.gray_mode_enabled)
+        
+        toggle_layout.addWidget(self.rb_gray_off)
+        toggle_layout.addWidget(self.rb_gray_on)
+        toggle_layout.addStretch()
+        
+        gray_layout.addLayout(toggle_layout)
+        
+        # Connect signals
+        self.rb_gray_on.toggled.connect(self.on_gray_mode_changed)
+        
+        layout.addWidget(gray_group)
+        
+        # --- Terminal Array Setting ---
+        term_group = QGroupBox("Terminal Array (Draw Order)")
+        term_layout = QVBoxLayout(term_group)
+        term_layout.setSpacing(0) # Ultimate tight gap (matches Visualization style)
+        term_layout.setContentsMargins(5, 2, 5, 5) # Tightened top/bottom margins
+        
+        term_hint = QLabel("Enter terminal names in order (top to bottom), one per line:")
+        term_hint.setStyleSheet("font-size: 11px; color: #565f89; margin: 0px; padding: 0px;")
+        term_layout.addWidget(term_hint)
+        
+        self.term_order_input = QTextEdit()
+        self.term_order_input.setPlaceholderText("Example:\nGWCT\nBIT\nPNIT")
+        self.term_order_input.setMaximumHeight(120)
+        self.term_order_input.setText("\n".join(self.terminal_order))
+        # Request: Arial, Bold, Black text, tight spacing
+        self.term_order_input.setStyleSheet("""
+            background-color: #ffffff; 
+            color: #000000; 
+            font-family: 'Arial'; 
+            font-weight: bold; 
+            font-size: 13px;
+            border: 1px solid #414868;
+            margin-top: 0px;
+        """)
+        term_layout.addWidget(self.term_order_input)
+        
+        term_layout.addSpacing(5)
+        btn_apply_order = QPushButton("Apply Terminal Order")
+        btn_apply_order.clicked.connect(self.on_terminal_order_changed)
+        term_layout.addWidget(btn_apply_order)
+        
+        layout.addWidget(term_group)
+        layout.addStretch()
+
+    def on_gray_mode_changed(self, enabled):
+        self.gray_mode_enabled = enabled
+        # Trigger redraw of all vessel items in the current scene
+        if hasattr(self, 'scene') and self.scene:
+            for item in self.scene.items():
+                if isinstance(item, VesselItem):
+                    item.update()
+
+    def on_terminal_order_changed(self):
+        text = self.term_order_input.toPlainText().strip()
+        new_order = [line.strip() for line in text.split('\n') if line.strip()]
+        self.terminal_order = new_order
+        save_terminal_order(new_order)
+        
+        # Re-sort and redraw
+        self.sort_terminals()
+        self.draw_graphic()
+        # Also update table if needed
+        self.update_table()
+
+    def sort_terminals(self):
+        # Determine the custom sort key logic
+        def get_sort_key(berth_str):
+            parts = berth_str.split('-', 1)
+            term = parts[0].strip()
+            berth = parts[1].strip() if len(parts) > 1 else ""
+            
+            if term in self.terminal_order:
+                # Custom order (Primary)
+                return (0, self.terminal_order.index(term), alphanumeric_key(berth))
+            else:
+                # Alphabetical fallback (Secondary)
+                return (1, alphanumeric_key(term), alphanumeric_key(berth))
+        
+        # 1. Update all Port objects (Backend)
+        for p_code, p_obj in self.ports.items():
+            if p_obj.terminal_list:
+                p_obj.terminal_list = sorted(list(set(p_obj.terminal_list)), key=get_sort_key)
+            
+            if p_obj.original_vessel_data:
+                # Also sort original data so that resets preserve the order
+                p_obj.original_vessel_data.sort(key=lambda d: (get_sort_key(d.get('full_berth', '')), d.get('eta', datetime.min)))
+            
+            # 1.5 Detect Duplicates (Same Vessel Name + Voyage)
+            from collections import defaultdict
+            p_obj.auto_connections = []
+            if p_obj.vessel_data_list:
+                dupes_map = defaultdict(list)
+                for i, d in enumerate(p_obj.vessel_data_list):
+                    v_name = d.get('모선명', '').strip()
+                    v_voy = d.get('선사항차', '').strip()
+                    if v_name and v_voy:
+                        dupes_map[(v_name, v_voy)].append(i)
+                
+                for key, indices in dupes_map.items():
+                    if len(indices) >= 2:
+                        for idx_in_sub in range(len(indices) - 1):
+                            p_obj.auto_connections.append((indices[idx_in_sub], indices[idx_in_sub+1]))
+        
+        # 2. Update Active View references
+        active_port = self.ports.get(self.active_port_code)
+        if active_port:
+            self.terminal_list = active_port.terminal_list
+            self.vessel_data_list = active_port.vessel_data_list
+
     def perform_search(self):
         # 1. Reset Previous
         self.clear_search(clear_input=False)
@@ -1830,24 +2154,23 @@ class BerthMonitor(QMainWindow):
         matching_vessels = []
         
         for search_line in lines:
-            tokens = search_line.lower().split()
-            if not tokens: continue
+            words = search_line.lower().split()
+            if not words: continue
+            
+            # Potential Name Part 1: Everything except the last word (treating last word as voyage)
+            name_query_1 = " ".join(words[:-1]) if len(words) > 1 else words[0]
+            # Potential Name Part 2: The entire string (treating it as just the name)
+            name_query_2 = " ".join(words)
             
             # Search in current vessel list
             for vessel_item in self.scene.items():
                 if not isinstance(vessel_item, VesselItem): continue
                 
                 data = vessel_item.data
-                # Construct searchable string
-                v_name = data.get('모선명', '').lower()
-                v_voy = str(data.get('모선항차', '')).lower()
+                v_name = data.get('모선명', '').lower().strip()
                 
-                # Combined string for searching
-                target_str = f"{v_name} {v_voy}"
-                
-                # Check ALL tokens
-                if all(token in target_str for token in tokens):
-                    # MATCH FOUND
+                # Match if the vessel name EXACTLY equals either potential name query
+                if v_name == name_query_1 or v_name == name_query_2:
                     matching_vessels.append(vessel_item)
                     vessel_item.is_searched = True
                     # Start Rainbow Animation (reuses Highlight logic)
@@ -2137,11 +2460,16 @@ class BerthMonitor(QMainWindow):
         self.draw_graphic()
 
     def get_color(self, line):
+        # 1. MSC Exception (Force #c8ff31)
+        if line and "MSC" in str(line).upper():
+            return QColor("#c8ff31")
+
+        # 2. Check existing mapping
         if line not in self.line_colors or not self.line_colors[line].isValid():
-            # Generate Random Pastel Color
+            # Generate Random "Bright Pastel" Color
             hue = random.randint(0, 359)
-            saturation = random.randint(90, 160) # Low saturation for pastel
-            value = random.randint(200, 255)     # High value for brightness
+            saturation = random.randint(50, 100) # Lower saturation for lighter pastel
+            value = random.randint(245, 255)     # Higher value for extra brightness
             
             color = QColor.fromHsv(hue, saturation, value)
             self.line_colors[line] = color
@@ -2375,8 +2703,12 @@ class BerthMonitor(QMainWindow):
         dialog.exec_()
 
     def reset_data(self):
-        if not self.original_vessel_data: return
-        self.clear_analysis_artifacts() # Clear visual effects
+        # 1. Identify Port
+        port = self.ports.get(self.active_port_code)
+        if not port or not port.original_vessel_data: return
+        
+        # 2. Clear Visuals & Reset UI Buttons
+        self.clear_analysis_artifacts() 
         self.current_view_mode = "NORMAL"
         self.highlight_btn.setChecked(False); self.highlight_btn.setStyleSheet("")
         self.highlight_btn.setText("✨ Highlight Mode\noff")
@@ -2384,22 +2716,32 @@ class BerthMonitor(QMainWindow):
         self.connect_btn.setText("🔗 Connect Mode\noff")
         self.copy_btn.setChecked(False); self.copy_btn.setStyleSheet("")
         self.copy_btn.setText("📋 Vessel Copy\noff")
+        self.btn_memo.setChecked(False); self.btn_memo.setStyleSheet("")
+        self.btn_memo.setText("MEMO\noff")
+        self.is_memo_mode = False
         
-        # Reset ACTIVE port data
-        port = self.ports[self.active_port_code]
+        # 3. Restore Data from Backup (Original)
         port.vessel_data_list = copy.deepcopy(port.original_vessel_data)
         
-        # Update Refs
-        self.vessel_data_list = port.vessel_data_list
-        
-        # Clear Logs
+        # 4. Clear Logs ONLY
         port.master_log_data = []
         port.slave_log_data = []
         port.ts_connections = {}
+        # auto_connections are not cleared (found at paste time)
         
+        # 5. Sync App References
+        self.vessel_data_list = port.vessel_data_list
+        self.original_vessel_data = port.original_vessel_data
+        self.terminal_list = port.terminal_list
+        self.ts_connections = port.ts_connections
+        
+        # 6. Stabilization: re-run terminal sorting
+        self.sort_terminals()
+        
+        # 7. Refresh UI
         self.repopulate_logs()
+        self.update_filters()
         self.refresh_ts_table()
-        
         self.update_table()
         self.draw_graphic()
 
@@ -2434,7 +2776,12 @@ class BerthMonitor(QMainWindow):
                 d = {self.headers[i]: row[i] for i in range(min(len(self.headers), len(row)))}
                 d['eta'] = parse_date(d.get('접안예정일시', ''))
                 d['etd'] = parse_date(d.get('출항예정일시', ''))
-                d['full_berth'] = f"{d.get('터미널', '')}-{d.get('선석', '')}"
+                # Apply strip to prevent sorting issues with whitespace
+                term_clean = d.get('터미널', '').strip()
+                berth_clean = d.get('선석', '').strip()
+                d['터미널'] = term_clean
+                d['선석'] = berth_clean
+                d['full_berth'] = f"{term_clean}-{berth_clean}"
                 new_list.append(d)
                 berths.add(d['full_berth'])
         else:
@@ -2489,15 +2836,25 @@ class BerthMonitor(QMainWindow):
                 # Parse dates
                 d['eta'] = parse_date(d.get('접안예정일시', ''))
                 d['etd'] = parse_date(d.get('출항예정일시', ''))
-                d['full_berth'] = f"{d.get('터미널', '')}-{d.get('선석', '')}"
+                
+                # Apply strip
+                term_clean = d.get('터미널', '').strip()
+                berth_clean = d.get('선석', '').strip()
+                d['터미널'] = term_clean
+                d['선석'] = berth_clean
+                d['full_berth'] = f"{term_clean}-{berth_clean}"
                 
                 new_list.append(d)
                 berths.add(d['full_berth'])
             
         # Update SPECIFIC Port Data
         port.vessel_data_list = new_list
-        port.terminal_list = sorted(list(berths))
+        port.terminal_list = list(berths)
         port.original_vessel_data = copy.deepcopy(new_list)
+        # Duplicate detection now happens inside sort_terminals()
+        
+        # Apply custom terminal sort
+        self.sort_terminals()
         
         # Reset Logs for that port
         port.master_log_data = []
@@ -2673,6 +3030,33 @@ class BerthMonitor(QMainWindow):
             self.scene.addItem(item)
             self.vessel_items.append(item)
 
+        # 4. DRAW AUTO-CONNECTIONS (Duplicates)
+        port = self.ports[self.active_port_code]
+        for idx1, idx2 in port.auto_connections:
+            # Note: idx1 and idx2 are indices into vessel_data_list
+            # Since we only created items for those NOT filtered out, we need to be careful.
+            # However, usually duplicates share similar properties (Line/Route), so they likely pass filters together.
+            # Let's find the items by their data reference.
+            v_item1 = None
+            v_item2 = None
+            d1 = self.vessel_data_list[idx1]
+            d2 = self.vessel_data_list[idx2]
+            
+            for item in self.vessel_items:
+                if item.data is d1: v_item1 = item
+                if item.data is d2: v_item2 = item
+            
+            if v_item1 and v_item2:
+                v_item1.is_duplicate = True
+                v_item2.is_duplicate = True
+                
+                # Draw Lavender Connection Line (Simplified Arrow or just Line)
+                # Reuse ConnectionLineItem but with Lavender color
+                conn_line = ConnectionLineItem(v_item1, v_item2)
+                conn_line.setPen(QPen(QColor("#bfabff"), 3, Qt.DashLine))
+                conn_line.label.setDefaultTextColor(QColor("#bfabff"))
+                self.scene.addItem(conn_line)
+
         # Current Time Display
         self.update_current_time_display()
 
@@ -2757,63 +3141,92 @@ class BerthMonitor(QMainWindow):
     def update_ticker_content(self):
         """Gather and format data for the scrolling news ticker with colored segments"""
         now = datetime.now()
-        segments = [] # List of (text, color)
+        stats_segments = []
+        memo_segments = []
         
-        # 1. Off-work countdown (6 PM) and Weekend info - Bright Pink (#ff69b4)
         pink_color = QColor("#ff69b4")
         green_color = QColor("#50fa7b")
+        blue_color = QColor("#00bfff")
         
-        # Off-work countdown
-        off_work_time = now.replace(hour=18, minute=0, second=0, microsecond=0)
-        if now < off_work_time:
-            diff = off_work_time - now
-            h = diff.seconds // 3600
-            m = (diff.seconds % 3600) // 60
-            s = diff.seconds % 60
-            segments.append((f"⏰ 퇴근까지 남은 시간: {h:02d}:{m:02d}:{s:02d}", pink_color))
-        else:
-            segments.append(("🎉 퇴근 시간이 지났습니다! 고생하셨습니다!", pink_color))
+        # --- STATS CONTENT (Left) ---
+        # 0. MSC Vessel Counts (In Port)
+        msc_counts = defaultdict(int)
+        if hasattr(self, 'vessel_items'):
+            for v in self.vessel_items:
+                v_name = v.data.get('모선명', '').upper()
+                if "MSC" in v_name and v.is_in_port:
+                    term = v.data.get('터미널', 'Unknown')
+                    msc_counts[term] += 1
+        
+        if msc_counts:
+            # Sort by terminal name
+            sorted_msc = sorted(msc_counts.items())
+            msc_text = "🚢 MSC 현황: " + " | ".join([f"[{t}: {c}척]" for t, c in sorted_msc])
+            stats_segments.append((msc_text, QColor("#ffff00"))) # Bright yellow
             
-        # Weekend info (Days until Saturday)
-        # Weekday: Mon=0, ..., Fri=4, Sat=5, Sun=6
-        current_weekday = now.weekday()
-        if current_weekday < 5: # Mon-Fri
-            days_to_weekend = 5 - current_weekday
-            segments.append((f"📅 주말까지 {days_to_weekend}일 남았습니다!", pink_color))
-        elif current_weekday == 5:
-            segments.append(("💃 오늘은 즐거운 토요일입니다!", pink_color))
+        # 1. Work Time Related
+        if 7 <= now.hour < 9:
+            # Countdown to 9:00 AM
+            start_work_time = now.replace(hour=9, minute=0, second=0, microsecond=0)
+            diff = start_work_time - now
+            h, rem = divmod(diff.seconds, 3600)
+            m, s = divmod(rem, 60)
+            stats_segments.append((f"⏰ 출근까지: {h:02d}:{m:02d}:{s:02d}", pink_color))
         else:
-            segments.append(("🛌 오늘은 편안한 일요일입니다!", pink_color))
+            off_work_time = now.replace(hour=18, minute=0, second=0, microsecond=0)
+            if now < off_work_time:
+                diff = off_work_time - now
+                h, rem = divmod(diff.seconds, 3600)
+                m, s = divmod(rem, 60)
+                stats_segments.append((f"⏰ 퇴근까지: {h:02d}:{m:02d}:{s:02d}", pink_color))
+            else:
+                stats_segments.append(("🎉 퇴근 시간이 지났습니다!", pink_color))
+            
+        current_weekday = now.weekday()
+        if current_weekday < 5:
+            days_to_weekend = 5 - current_weekday
+            stats_segments.append((f"📅 주말까지 {days_to_weekend}일!", pink_color))
+        elif current_weekday == 5:
+            stats_segments.append(("💃 토요일!", pink_color))
+        else:
+            stats_segments.append(("🛌 일요일!", pink_color))
 
-        # 2. In-Port Vessels (Red Outline) - Bright Green (#50fa7b)
         connected_vessels = []
-        if hasattr(self, 'vessel_items') and self.vessel_items:
+        if hasattr(self, 'vessel_items'):
             for v in self.vessel_items:
                 if v.is_in_port:
                     remaining = v.data['etd'] - now
-                    hours = remaining.total_seconds() / 3600
-                    if hours < 0: hours = 0 
+                    hours = max(0, remaining.total_seconds() / 3600)
                     v_name = v.data.get('모선명', 'Unknown')
-                    connected_vessels.append(f"🚢 [{v_name}] IN PORT - {hours:.1f}H Left")
+                    connected_vessels.append(f"🚢 [{v_name}] {hours:.1f}H Left")
         
         if connected_vessels:
-            segments.append((" | ".join(connected_vessels), green_color))
+            stats_segments.append((" | ".join(connected_vessels), green_color))
             
-        # 3. Memos - Bright Blue (#00bfff)
-        blue_color = QColor("#00bfff")
-        memo_messages = []
+        if not stats_segments:
+            stats_segments.append(("WELCOME TO BERTH SIMULATION MONITOR ...", green_color))
+            
+        self.stats_ticker.set_text_segments(stats_segments)
+
+        # --- MEMO CONTENT (Right) ---
+        warning_msg = "메모 내용을 꼭 실행하세요"
+        first = True
+        
         for key, text in self.memo_data.items():
             if text.strip():
                 v_name = key.split('|')[0] if '|' in key else key
-                memo_messages.append(f"🚢 [{v_name}] {text} {{이 메모의 내용을 확인하고 꼭 실행 하시기 바랍니다}}")
+                if first:
+                    # First memo includes the warning prefix
+                    memo_segments.append((f"\"{warning_msg}\" - {{{v_name}, {text}}}", blue_color))
+                    first = False
+                else:
+                    # Subsequent memos prefixed with comma for a list feel
+                    memo_segments.append((f", {{{v_name}, {text}}}", blue_color))
         
-        if memo_messages:
-            segments.append((" | ".join(memo_messages), blue_color))
+        if not memo_segments:
+            memo_segments.append(("No active memos ...", QColor("#888888")))
             
-        if not segments:
-            segments.append(("WELCOME TO BERTH SIMULATION MONITOR ... NO ACTIVE EVENTS ...", green_color))
-            
-        self.ticker.set_text_segments(segments)
+        self.memo_ticker.set_text_segments(memo_segments)
 
     def get_original_data(self, current_data):
         key_name = current_data['모선명']
